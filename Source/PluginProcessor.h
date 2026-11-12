@@ -42,6 +42,7 @@ public:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
     eqd::Band readBand (int i) const;
     eqd::Tilt readTilt() const;
+    eqd::Tilt readLine() const;                      // straight-line tilt (dB/oct), last stage
     eqd::PhaseMode readMode() const;
     double readTuning() const;                       // reference pitch for note names (Hz)
     static int slopeFromIndex (int idx);
@@ -70,7 +71,10 @@ public:
 private:
     void parameterChanged (const juce::String&, float) override;
     void handleAsyncUpdate() override;
-    void runDesign();
+    void runDesign (int mask = 3);
+    void updateLatency();
+    void designLine (double fs, int quality);
+    void runComp (float* L, float* R, int n);
     void updateMeters (const juce::AudioBuffer<float>& buffer, int start, int n, int numCh);
 
     struct DesignThread : public juce::Thread
@@ -82,19 +86,25 @@ private:
             {
                 wait (-1);
                 if (threadShouldExit()) break;
-                while (dirty.exchange (false) && ! threadShouldExit()) owner.runDesign();
+                int m;
+                while ((m = dirtyMask.exchange (0)) != 0 && ! threadShouldExit()) owner.runDesign (m);
             }
         }
-        void trigger() { dirty = true; notify(); }
+        void trigger (int mask) { dirtyMask |= mask; notify(); }
         MasteringEQAudioProcessor& owner;
-        std::atomic<bool> dirty { false };
+        std::atomic<int> dirtyMask { 0 };
     };
 
     DesignThread designThread { *this };
 
     juce::dsp::Convolution convLL, convLR, convRL, convRR;
     juce::AudioBuffer<float> bufLL, bufLR, bufRL, bufRR, dryBuf, tpScratch, inBuf;
-    juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::None> dryDelay { 140000 };
+    juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::None> dryDelay { 300000 };
+    juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::None> compDelay { 150000 };
+    juce::dsp::Convolution convCL, convCR, convTL, convTR;   // convT*: straight-line tilt, last stage                 // split-compressor band filter
+    juce::AudioBuffer<float> compBufL, compBufR;
+    std::atomic<int> latencyEq { 0 }, latencyComp { 0 }, latencyLine { 0 };
+    float compState[2] { 0.0f, 0.0f };
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> gainSmooth, bypassSmooth;
 
     std::atomic<double> currentSampleRate { 0.0 };
@@ -103,8 +113,12 @@ private:
     int maxBlock = 512;
 
     // metering state
-    juce::dsp::Oversampling<float> tpOversampler { 2, 2, juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple, true, false };
-    juce::dsp::Oversampling<float> tpOs8 { 2, 3, juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple, true, false };
+    // true peak by polyphase windowed-sinc interpolation, any factor (4x ... 40x; 24x of 44.1 kHz = 1.06 MHz)
+    static constexpr int kTpTaps = 24;
+    int tpFactor = 0;
+    std::vector<float> tpCoef;                 // [(K-1) phases][kTpTaps]
+    std::vector<float> tpHist[2], tpTmp;
+    void buildTruePeakKernel (int K);
     float inRmsState = 0.0f, inPeakHold = 0.0f;
     float vuState[2] { 0, 0 }, ppmState[2] { 0, 0 }, rmsState[2] { 0, 0 }, tpHold[2] { 0, 0 };
     float vuCoef = 0.0f, ppmAttack = 0.0f, ppmDecay = 1.0f, rmsCoef = 0.0f;

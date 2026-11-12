@@ -268,12 +268,14 @@ void DuneField::timerCallback()
         if (bands[i].on && (bands[i].ch == eqd::Channel::Mid || bands[i].ch == eqd::Channel::Side)) anyMS = true;
     }
     const auto tilt = proc.readTilt();
+    const auto line = proc.readLine();
     const double fs = std::max (proc.getSampleRate(), 8000.0);
     for (int i = 0; i < kPoints; ++i)
     {
         const double u = (double) i / (double) (kPoints - 1);
         const double f = 3.0 * std::pow (10000.0, u);
-        dbL[(size_t) i] = (float) eqd::totalMagnitudeDb (bands, eqd::kMaxBands, eqd::Channel::Left, f, &tilt);
+        const double lineDb = eqd::tiltDb (line, f);
+        dbL[(size_t) i] = (float) (eqd::totalMagnitudeDb (bands, eqd::kMaxBands, eqd::Channel::Left, f, &tilt) + lineDb);
         dbM[(size_t) i] = (float) eqd::totalMagnitudeDb (bands, eqd::kMaxBands, eqd::Channel::Mid, f, nullptr) + dbL[(size_t) i];
         dbS[(size_t) i] = (float) eqd::totalMagnitudeDb (bands, eqd::kMaxBands, eqd::Channel::Side, f, nullptr) + dbL[(size_t) i];
         const int bin = juce::jlimit (1, fftSize / 2 - 1, (int) std::lround (f / fs * (double) fftSize));
@@ -306,6 +308,8 @@ void DuneField::timerCallback()
     }
     repaint();
 }
+
+namespace { const char* kOsNames[] { "4x", "8x", "16x", "24x", "32x", "40x" }; }
 
 void NagraSwitch::paintButton (juce::Graphics& g, bool highlighted, bool)
 {
@@ -544,6 +548,7 @@ void DuneField::drawMeters (juce::Graphics& g)
     }
     g.setColour (pal.dim);
     g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 9.5f, juce::Font::plain)));
+    g.drawText ("OVERSAMPLING TP", (int) P.getX() + 186, (int) P.getY() + 148, 110, 12, juce::Justification::left);
     g.drawText (juce::String::fromUTF8 ("\xE2\x94\x80 rouge : PEAK    \xE2\x94\x80 noir : VU lent  (clic : reset)"), (int) P.getX() + 8, (int) P.getY() + 128, 270, 12,
                 juce::Justification::left);
 
@@ -596,7 +601,7 @@ void DuneField::drawMeters (juce::Graphics& g)
     g.setColour (pal.dim);
     g.setFont (small);
     g.drawText ("GAIN SORTIE " + juce::String (gainDb >= 0.05 ? "+" : "") + juce::String (gainDb, 1) + " dB", (int) colX[0], (int) y, 150, 12, juce::Justification::left);
-    g.drawText (proc.apvts.getRawParameterValue ("tp8x")->load() > 0.5f ? "TP 8x" : "TP 4x", (int) colX[3], (int) y, 70, 12, juce::Justification::right);
+    g.drawText ("TP " + juce::String (kOsNames[juce::jlimit (0, 5, (int) std::lround (proc.apvts.getRawParameterValue ("os")->load()))]), (int) colX[3], (int) y, 70, 12, juce::Justification::right);
 
     // ---------------- dynamic-range spreader: loudness -> peak, input over output
     y += 16.0f;
@@ -637,6 +642,8 @@ BandStrip::BandStrip (MasteringEQAudioProcessor& p, int index, const Palette& pl
     addAndMakeVisible (numBtn);
     fillCombo (proc.apvts, id ("type"), typeBox);
     fillCombo (proc.apvts, id ("slope"), slopeBox);
+    fillCombo (proc.apvts, id ("fam"), famBox);
+    addAndMakeVisible (famBox);
     addAndMakeVisible (typeBox);
     addAndMakeVisible (slopeBox);
 
@@ -653,6 +660,7 @@ BandStrip::BandStrip (MasteringEQAudioProcessor& p, int index, const Palette& pl
     onAtt    = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>   (proc.apvts, id ("on"),    numBtn);
     typeAtt  = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, id ("type"),  typeBox);
     slopeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, id ("slope"), slopeBox);
+    famAtt   = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, id ("fam"), famBox);
     freqAtt  = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>   (proc.apvts, id ("freq"),  freqKnob);
     gainAtt  = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>   (proc.apvts, id ("gain"),  gainKnob);
     qAtt     = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>   (proc.apvts, id ("q"),     qKnob);
@@ -679,8 +687,10 @@ void BandStrip::refresh()
     hasGain = b.type == eqd::BandType::Bell || b.type == eqd::BandType::LowShelf || b.type == eqd::BandType::HighShelf;
 
     slopeBox.setVisible (isPass);
+    famBox.setVisible (isPass);
     gainKnob.setVisible (hasGain);
-    qKnob.setVisible (! isPass);
+    qKnob.setVisible (true);
+    if (isPass) qKnob.setBounds (10, 188, 52, 50); else qKnob.setBounds (79, 143, 58, 58);
 
     const int ch = (int) b.ch;
     stBtn.setToggleState (ch == 0, juce::dontSendNotification);
@@ -688,7 +698,7 @@ void BandStrip::refresh()
     sBtn.setToggleState (ch == 4, juce::dontSendNotification);
 
     const float a = bandOn ? 1.0f : 0.38f;
-    for (auto* c : std::initializer_list<juce::Component*> { &typeBox, &slopeBox, &freqKnob, &gainKnob, &qKnob, &stBtn, &mBtn, &sBtn })
+    for (auto* c : std::initializer_list<juce::Component*> { &typeBox, &slopeBox, &famBox, &freqKnob, &gainKnob, &qKnob, &stBtn, &mBtn, &sBtn })
         c->setAlpha (a);
     repaint();
 }
@@ -698,7 +708,8 @@ void BandStrip::resized()
     numBtn.setBounds (8, 10, 30, 22);
     typeBox.setBounds (42, 10, 100, 22);
     freqKnob.setBounds (38, 40, 74, 74);
-    slopeBox.setBounds (8, 167, 134, 22);
+    famBox.setBounds (8, 142, 134, 20);
+    slopeBox.setBounds (8, 165, 134, 20);
     gainKnob.setBounds (12, 143, 58, 58);
     qKnob.setBounds (79, 143, 58, 58);
     stBtn.setBounds (9, 238, 41, 19);
@@ -726,15 +737,93 @@ void BandStrip::paint (juce::Graphics& g)
         g.setColour (pal.fg.withAlpha (a));
         g.drawText ((v > 0.05 ? "+" : "") + juce::String (v, 1) + " dB", 6, 205, 70, 18, juce::Justification::centred);
     }
-    if (! isPass)
-    {
-        g.setColour (pal.fg.withAlpha (a));
-        g.drawText ("Q " + juce::String (qKnob.getValue(), 2), 73, 205, 70, 18, juce::Justification::centred);
-    }
+    g.setColour (pal.fg.withAlpha (a));
+    if (isPass) g.drawText ("Q " + juce::String (qKnob.getValue(), 2), 66, 204, 78, 18, juce::Justification::centredLeft);
+    else        g.drawText ("Q " + juce::String (qKnob.getValue(), 2), 73, 205, 70, 18, juce::Justification::centred);
 }
 
 // ===========================================================================
-DuneContent::DuneContent (MasteringEQAudioProcessor& p) : proc (p), field (p, palette), curvesBtn ("COURBES", palette), curvesTopBtn ("DESSUS", palette), tiltBtn ("TILT", palette), bypassBtn ("BYPASS", palette), lookBtn ("ANTICIPATION", palette), tp8Btn ("TP 8X", palette)
+// Split compressor panel
+CompPanel::CompPanel (MasteringEQAudioProcessor& p, const Palette& pl)
+    : proc (p), pal (pl), onBtn ("SPLIT COMP", pl), postBtn ("POST EQ", pl), minBtn ("LINEAIRE", pl)
+{
+    static const char* ids[8] { "comp_lo", "comp_hi", "comp_thr", "comp_ratio", "comp_att", "comp_rel", "comp_knee", "comp_mk" };
+    for (int i = 0; i < 8; ++i)
+    {
+        auto& s = knob[i];
+        s.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
+        s.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
+        s.setRotaryParameters (juce::MathConstants<float>::pi * 1.2f, juce::MathConstants<float>::pi * 2.8f, true);
+        s.setMouseDragSensitivity (220);
+        addAndMakeVisible (s);
+        knobAtt[i] = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.apvts, ids[i], s);
+    }
+    knob[7].getProperties().set ("bipolar", true);
+    for (auto* b : { &onBtn, &postBtn, &minBtn }) addAndMakeVisible (b);
+    for (auto* c : { &msBox, &sloBox, &shiBox }) addAndMakeVisible (c);
+    fillCombo (proc.apvts, "comp_ms", msBox);
+    fillCombo (proc.apvts, "comp_slo", sloBox);
+    fillCombo (proc.apvts, "comp_shi", shiBox);
+    msAtt  = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, "comp_ms", msBox);
+    sloAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, "comp_slo", sloBox);
+    shiAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, "comp_shi", shiBox);
+    onAtt   = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, "comp_on", onBtn);
+    postAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, "comp_post", postBtn);
+    minAtt  = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, "comp_min", minBtn);
+}
+
+void CompPanel::resized()
+{
+    onBtn.setBounds (8, 8, 116, 26);
+    postBtn.setBounds (130, 8, 96, 26);
+    minBtn.setBounds (232, 8, 106, 26);
+    msBox.setBounds (346, 9, 100, 24);
+    for (int i = 0; i < 8; ++i) knob[i].setBounds (8 + 66 * i + 6, 42, 52, 52);
+    sloBox.setBounds (8, 124, 98, 22);
+    shiBox.setBounds (110, 124, 98, 22);
+}
+
+void CompPanel::refresh()
+{
+    postBtn.setLabel (postBtn.getToggleState() ? "POST EQ" : "PRE EQ");
+    minBtn.setLabel (minBtn.getToggleState() ? "MINIMALE" : "LINEAIRE");
+    const float a = onBtn.getToggleState() ? 1.0f : 0.45f;
+    for (auto& k : knob) k.setAlpha (a);
+    repaint();
+}
+
+void CompPanel::paint (juce::Graphics& g)
+{
+    g.setColour (pal.bg.withAlpha (0.86f));
+    g.fillRect (getLocalBounds());
+    g.setColour (pal.ring);
+    g.drawRect (getLocalBounds(), 1);
+
+    static const char* names[8] { "COUPE-BAS", "COUPE-HAUT", "SEUIL", "RATIO", "ATTAQUE", "RELACHE", "KNEE", "GAIN" };
+    auto v = [this] (const char* id) { return (double) paramValue (proc.apvts, id); };
+    auto fq = [] (double f, bool lo) { return (lo && f <= 20.5) || (! lo && f >= 19999.0) ? juce::String ("ouvert") : (f >= 1000.0 ? juce::String (f / 1000.0, 2) + " kHz" : juce::String (f, 0) + " Hz"); };
+    juce::String txt[8] {
+        fq (v ("comp_lo"), true), fq (v ("comp_hi"), false), juce::String (v ("comp_thr"), 1) + " dB", juce::String (v ("comp_ratio"), 1) + ":1",
+        v ("comp_att") < 10.0 ? juce::String (v ("comp_att"), 1) + " ms" : juce::String ((int) v ("comp_att")) + " ms",
+        v ("comp_rel") >= 1000.0 ? juce::String (v ("comp_rel") / 1000.0, 2) + " s" : juce::String ((int) v ("comp_rel")) + " ms",
+        juce::String (v ("comp_knee"), 1) + " dB", (v ("comp_mk") > 0.05 ? "+" : "") + juce::String (v ("comp_mk"), 1) + " dB" };
+    for (int i = 0; i < 8; ++i)
+    {
+        const int x = 8 + 66 * i;
+        g.setColour (pal.dim);
+        g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 9.0f, juce::Font::bold)));
+        g.drawText (names[i], x, 96, 66, 11, juce::Justification::centred);
+        g.setColour (pal.fg);
+        g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 10.5f, juce::Font::plain)));
+        g.drawText (txt[i], x, 108, 66, 13, juce::Justification::centred);
+    }
+    g.setColour (pal.dim);
+    g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 9.0f, juce::Font::plain)));
+    g.drawText (juce::String::fromUTF8 ("pente bas / haut  \xC2\xB7  meme moteur FIR que l'EQ"), 216, 130, 320, 12, juce::Justification::left);
+}
+
+// ===========================================================================
+DuneContent::DuneContent (MasteringEQAudioProcessor& p) : proc (p), field (p, palette), curvesBtn ("COURBES", palette), curvesTopBtn ("DESSUS", palette), tiltBtn ("TILT", palette), bypassBtn ("BYPASS", palette), lookBtn ("ANTICIPATION", palette), lineBtn ("TILT DROIT", palette), comp (p, palette)
 {
     setLookAndFeel (&lnf);
     lnf.setPalette (palette);
@@ -769,9 +858,21 @@ DuneContent::DuneContent (MasteringEQAudioProcessor& p) : proc (p), field (p, pa
     addAndMakeVisible (curvesBtn);
     addAndMakeVisible (curvesTopBtn);
     addAndMakeVisible (lookBtn);
-    addAndMakeVisible (tp8Btn);
+    addAndMakeVisible (osBox);
+    addAndMakeVisible (lineBtn);
+    for (auto* s : { &lineSlider, &linePivot })
+    {
+        s->setSliderStyle (juce::Slider::LinearHorizontal);
+        s->setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
+        addAndMakeVisible (s);
+    }
+    lineAtt   = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, "tilt_line", lineBtn);
+    lineSAtt  = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.apvts, "line_db", lineSlider);
+    linePAtt  = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.apvts, "line_freq", linePivot);
+    addAndMakeVisible (comp);
+    fillCombo (proc.apvts, "os", osBox);
+    osAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, "os", osBox);
     lookAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, "look", lookBtn);
-    tp8Att  = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, "tp8x", tp8Btn);
     curvesAtt    = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, "curves_on", curvesBtn);
     curvesTopAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, "curves_top", curvesTopBtn);
     tiltAtt   = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, "tilt_on", tiltBtn);
@@ -831,7 +932,7 @@ void DuneContent::timerCallback()
     for (auto& s : strips) s->refresh();
     curvesTopBtn.setLabel (curvesTopBtn.getToggleState() ? "DESSUS" : "DESSOUS");
     curvesTopBtn.setEnabled (curvesBtn.getToggleState());
-    tp8Btn.setLabel (tp8Btn.getToggleState() ? "TP 8X" : "TP 4X");
+    comp.refresh();
 
     const double fs = std::max (proc.getSampleRate(), 1.0);
     footerText = juce::String::fromUTF8 ("64-bit  \xC2\xB7  courbes analogiques exactes  \xC2\xB7  latence ")
@@ -854,9 +955,15 @@ void DuneContent::resized()
     bypassBtn.setBounds (1148, y, 86, h);
 
     field.setBounds (0, 45, (int) kW, 418);
-    for (auto* b : { &curvesBtn, &curvesTopBtn, &lookBtn, &tp8Btn }) b->toFront (false);
+    for (auto* b : { &curvesBtn, &curvesTopBtn, &lookBtn }) b->toFront (false);
+    osBox.toFront (false);
+    lineBtn.setBounds (386, 761, 112, 24);
+    lineSlider.setBounds (502, 761, 100, 24);
+    linePivot.setBounds (690, 761, 80, 24);
+    comp.setBounds (690, 45 + 44, 546, 152);
+    comp.toFront (false);
     lookBtn.setBounds (26, 45 + 10 + 164, 150, 26);
-    tp8Btn.setBounds (186, 45 + 10 + 164, 110, 26);
+    osBox.setBounds (200, 45 + 10 + 166, 78, 22);
     curvesBtn.setBounds (920, 52, 100, 26);
     curvesTopBtn.setBounds (1030, 52, 100, 26);
     for (int i = 0; i < eqd::kMaxBands; ++i) strips[(size_t) i]->setBounds (150 * i, 465, 150, 287);
@@ -886,6 +993,13 @@ void DuneContent::paint (juce::Graphics& g)
     g.drawText ("SORTIE", 950, 11, 66, 24, juce::Justification::centredRight);
     g.drawText (juce::String (paramValue (proc.apvts, "out"), 1), 1100, 11, 46, 24, juce::Justification::centredLeft);
 
+    {
+        const double sl = paramValue (proc.apvts, "line_db"), pv = paramValue (proc.apvts, "line_freq");
+        g.setColour (palette.fg);
+        g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 11.5f, juce::Font::plain)));
+        g.drawText ((sl > 0.005 ? "+" : "") + juce::String (sl, 2) + " dB/oct", 606, 761, 82, 24, juce::Justification::centredLeft);
+        g.drawText (pv >= 1000.0 ? juce::String (pv / 1000.0, 2) + " kHz" : juce::String ((int) pv) + " Hz", 774, 761, 80, 24, juce::Justification::centredLeft);
+    }
     g.setColour (palette.dim);
     g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 11.0f, juce::Font::plain)));
     g.drawText (footerText, 16, 762, 600, 22, juce::Justification::centredLeft);

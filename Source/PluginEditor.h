@@ -46,6 +46,27 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+// Split compressor panel: one band (low cut + high cut with slopes), pre/post EQ, stereo or mid/side
+class CompPanel : public juce::Component
+{
+public:
+    CompPanel (MasteringEQAudioProcessor&, const Palette&);
+    void paint (juce::Graphics&) override;
+    void resized() override;
+    void refresh();
+
+private:
+    MasteringEQAudioProcessor& proc;
+    const Palette& pal;
+    NagraSwitch onBtn, postBtn, minBtn;
+    juce::ComboBox msBox, sloBox, shiBox;
+    juce::Slider knob[8];
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> knobAtt[8];
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> msAtt, sloAtt, shiAtt;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> onAtt, postAtt, minAtt;
+};
+
+// ---------------------------------------------------------------------------
 // Sand-dune field: dotted ridges that follow the EQ curve and the live spectrum, plus the modulometer
 class DuneField : public juce::Component, private juce::Timer
 {
@@ -101,10 +122,10 @@ private:
     bool isPass = false, hasGain = true;
 
     juce::TextButton numBtn, stBtn, mBtn, sBtn;
-    juce::ComboBox typeBox, slopeBox;
+    juce::ComboBox typeBox, slopeBox, famBox;
     juce::Slider freqKnob, gainKnob, qKnob;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> onAtt;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> typeAtt, slopeAtt;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> typeAtt, slopeAtt, famAtt;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> freqAtt, gainAtt, qAtt;
 };
 
@@ -128,14 +149,21 @@ private:
 
     juce::TextButton modeBtn[3];
     juce::ComboBox qualityBox, tuningBox, themeBox;
-    NagraSwitch curvesBtn, curvesTopBtn, tiltBtn, bypassBtn, lookBtn, tp8Btn;
+    NagraSwitch curvesBtn, curvesTopBtn, tiltBtn, bypassBtn, lookBtn;
+    juce::ComboBox osBox;
+    NagraSwitch lineBtn;
+    juce::Slider lineSlider, linePivot;
+    CompPanel comp;
     juce::TextButton plusBtn { "+" }, minusBtn { "-" };
     juce::Slider tiltSlider, outSlider;
     DuneField field;
     std::vector<std::unique_ptr<BandStrip>> strips;
 
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> qualityAtt, tuningAtt, themeAtt;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> tiltAtt, bypassAtt, curvesAtt, curvesTopAtt, lookAtt, tp8Att;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> tiltAtt, bypassAtt, curvesAtt, curvesTopAtt, lookAtt;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> osAtt;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> lineAtt;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> lineSAtt, linePAtt;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> tiltSliderAtt, outAtt;
     juce::String footerText;
     int lastTheme = -1;

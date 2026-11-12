@@ -17,7 +17,7 @@ namespace eqd
 using cd = std::complex<double>;
 constexpr double kPi = 3.14159265358979323846;
 
-enum class BandType { Bell = 0, LowShelf, HighShelf, HighPass, LowPass, Notch };
+enum class BandType { Bell = 0, LowShelf, HighShelf, HighPass, LowPass, Notch, BandPass, AllPass };
 enum class Channel { Stereo = 0, Left, Right, Mid, Side };
 enum class PhaseMode { Linear = 0, Natural = 1, Minimal = 2 };
 
@@ -30,6 +30,7 @@ struct Band
     double q = 1.0;         // bell / shelves / notch
     int slopeDbOct = 12;    // high-pass / low-pass (6 dB/oct steps, Butterworth)
     Channel ch = Channel::Stereo;
+    int family = 0;         // high-pass / low-pass: 0 Butterworth, 1 Linkwitz-Riley, 2 critically damped, 3 Chebyshev 1 dB
 };
 
 // Tilt: smooth see-saw around a pivot, +db at the top, -db at the bottom
@@ -38,6 +39,7 @@ struct Tilt
     bool on = false;
     double db = 0.0;
     double pivot = 650.0;
+    bool straight = false;   // true: db is a straight-line slope in dB/octave (no curve), applied at the end of the chain
 };
 
 constexpr int kMaxBands = 8;
@@ -45,7 +47,56 @@ constexpr int kMaxBands = 8;
 inline double tiltDb (const Tilt& t, double f)
 {
     if (! t.on) return 0.0;
+    if (t.straight) return std::clamp (t.db * std::log2 (std::max (f, 1.0) / t.pivot), -40.0, 40.0);
     return t.db * std::tanh (std::log2 (std::max (f, 1.0) / t.pivot) / 2.2);
+}
+
+// ---------------------------------------------------------------------------
+// Normalised low-pass poles (left half plane) for the cut-filter families; qr scales the Q of the sharpest pole pair
+inline const std::vector<cd>& passPoles (int family, int n, double qr)
+{
+    thread_local int kf = -1, kn = -1;
+    thread_local double kq = -1.0;
+    thread_local std::vector<cd> P;
+    if (family == kf && n == kn && qr == kq) return P;
+    kf = family; kn = n; kq = qr;
+    P.clear();
+    auto butter = [&] (int m) { for (int k = 1; k <= m; ++k) P.push_back (std::polar (1.0, kPi * (double) (2 * k + m - 1) / (double) (2 * m))); };
+    if (family == 1 && n >= 2 && n % 2 == 0) { butter (n / 2); butter (n / 2); }
+    else if (family == 2)
+    {
+        const double a = 1.0 / std::sqrt (std::pow (2.0, 1.0 / (double) n) - 1.0);
+        for (int k = 0; k < n; ++k) P.push_back (cd (-a, 0.0));
+    }
+    else if (family == 3)
+    {
+        const double eps = std::sqrt (std::pow (10.0, 0.1) - 1.0), mu = std::asinh (1.0 / eps) / (double) n;
+        for (int k = 1; k <= n; ++k)
+        {
+            const double th = kPi * (double) (2 * k - 1) / (double) (2 * n);
+            P.push_back (cd (-std::sinh (mu) * std::sin (th), std::cosh (mu) * std::cos (th)));
+        }
+    }
+    else butter (n);
+
+    if (std::abs (qr - 1.0) > 1e-6)   // resonance / damping of the sharpest complex pair
+    {
+        int best = -1; double bq = 0.0;
+        for (size_t i = 0; i < P.size(); ++i)
+            if (P[i].imag() > 1e-9) { const double q = std::abs (P[i]) / (2.0 * std::abs (P[i].real())); if (q > bq) { bq = q; best = (int) i; } }
+        if (best >= 0)
+        {
+            const double mag = std::abs (P[(size_t) best]);
+            const double q2 = std::max (bq * qr, 0.5);
+            int partner = -1; double dmin = 1e9;
+            for (size_t i = 0; i < P.size(); ++i)
+                if ((int) i != best && std::abs (P[i] - std::conj (P[(size_t) best])) < dmin) { dmin = std::abs (P[i] - std::conj (P[(size_t) best])); partner = (int) i; }
+            const double sg = mag / (2.0 * q2), w = std::sqrt (std::max (mag * mag - sg * sg, 0.0));
+            P[(size_t) best] = cd (-sg, w);
+            if (partner >= 0) P[(size_t) partner] = cd (-sg, -w);
+        }
+    }
+    return P;
 }
 
 // ---------------------------------------------------------------------------
@@ -85,15 +136,31 @@ inline cd bandResponse (const Band& b, double f)
         case BandType::HighPass:
         case BandType::LowPass:
         {
-            const int n = std::max (1, b.slopeDbOct / 6);          // Butterworth order
+            const int n = std::max (1, b.slopeDbOct / 6);          // order
+            const double qr = std::abs (b.q - 0.71) < 0.006 ? 1.0 : b.q / 0.70710678;
+            const auto& P = passPoles (b.family, n, qr);
             const cd s (0.0, x);
-            cd B (1.0, 0.0);
-            for (int k = 1; k <= n; ++k)
-                B *= (s - std::polar (1.0, kPi * (double) (2 * k + n - 1) / (double) (2 * n)));
-            if (b.type == BandType::LowPass) return cd (1.0, 0.0) / B;
-            cd sn (1.0, 0.0);
-            for (int k = 0; k < n; ++k) sn *= s;
+            double g = 1.0;
+            if (b.family == 3 && n % 2 == 0) g = 1.0 / std::sqrt (std::pow (10.0, 0.1));   // Chebyshev, even order: ripple below unity
+            if (b.type == BandType::LowPass)
+            {
+                cd K (g, 0.0), B (1.0, 0.0);
+                for (const auto& p : P) { K *= -p; B *= (s - p); }
+                return K / B;
+            }
+            cd sn (g, 0.0), B (1.0, 0.0);
+            for (const auto& p : P) { sn *= s; B *= (s - 1.0 / p); }
             return sn / B;
+        }
+        case BandType::BandPass:
+        {
+            const cd num (0.0, x / q), den (1.0 - x2, x / q);
+            return num / den;
+        }
+        case BandType::AllPass:
+        {
+            const cd num (1.0 - x2, -x / q), den (1.0 - x2, x / q);
+            return num / den;
         }
     }
     return cd (1.0, 0.0);
