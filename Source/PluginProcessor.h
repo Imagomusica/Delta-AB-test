@@ -73,7 +73,8 @@ private:
     void handleAsyncUpdate() override;
     void runDesign (int mask = 3);
     void updateLatency();
-    void designLine (double fs, int quality);
+    void chain (float* xL, float* xR, int nn, bool cross);
+    void designLine (double fs, double fsw, int quality);
     void runComp (float* L, float* R, int n);
     void updateMeters (const juce::AudioBuffer<float>& buffer, int start, int n, int numCh);
 
@@ -100,7 +101,12 @@ private:
     juce::dsp::Convolution convLL, convLR, convRL, convRR;
     juce::AudioBuffer<float> bufLL, bufLR, bufRL, bufRR, dryBuf, tpScratch, inBuf;
     juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::None> dryDelay { 300000 };
-    juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::None> compDelay { 150000 };
+    juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::None> compDelay { 1100000 };
+    // whole-chain oversampling (comp + EQ + tilt run at K x the host rate): 1x, 2x, 4x, 8x
+    std::unique_ptr<juce::dsp::Oversampling<float>> procOs[3];
+    juce::AudioBuffer<float> workIn, dsBuf;
+    std::atomic<int> activeK { 1 };
+    int curK = 1;
     juce::dsp::Convolution convCL, convCR, convTL, convTR;   // convT*: straight-line tilt, last stage                 // split-compressor band filter
     juce::AudioBuffer<float> compBufL, compBufR;
     std::atomic<int> latencyEq { 0 }, latencyComp { 0 }, latencyLine { 0 };

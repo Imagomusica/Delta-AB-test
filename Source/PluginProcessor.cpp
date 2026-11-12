@@ -64,6 +64,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout MasteringEQAudioProcessor::c
     layout.add (std::make_unique<AudioParameterFloat> (ParameterID { "line_freq", 1 }, "Straight tilt pivot",
                                                        logRange (100.0f, 10000.0f), 1000.0f,
                                                        AudioParameterFloatAttributes().withLabel ("Hz")));
+    layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "proc_os", 1 }, "Processing oversampling",
+                                                        StringArray { "1x", "2x", "4x", "8x" }, 0));
     layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "os", 1 }, "True peak oversampling",
                                                         StringArray { "4x", "8x", "16x", "24x", "32x", "40x" }, 0));
     layout.add (std::make_unique<AudioParameterBool> (ParameterID { "look", 1 }, "Meter lookahead", true));
@@ -188,23 +190,27 @@ void MasteringEQAudioProcessor::parameterChanged (const juce::String& id, float)
         if (id == "comp_lo" || id == "comp_hi" || id == "comp_slo" || id == "comp_shi" || id == "comp_min") designThread.trigger (2);
         return;                                                                       // dynamics are read per block
     }
-    designThread.trigger (id == "quality" ? 7 : 5);
+    designThread.trigger (id == "quality" || id == "proc_os" ? 7 : 5);
 }
 
 void MasteringEQAudioProcessor::updateLatency()
 {
-    latencyTarget = latencyEq.load() + (apvts.getRawParameterValue ("comp_on")->load() > 0.5f ? latencyComp.load() : 0)
-                    + (apvts.getRawParameterValue ("tilt_line")->load() > 0.5f ? latencyLine.load() : 0);
+    const int K = std::max (1, activeK.load());
+    const int work = latencyEq.load() + (apvts.getRawParameterValue ("comp_on")->load() > 0.5f ? latencyComp.load() : 0)
+                     + (apvts.getRawParameterValue ("tilt_line")->load() > 0.5f ? latencyLine.load() : 0);
+    int osLat = 0;
+    if (K > 1 && procOs[K == 2 ? 0 : (K == 4 ? 1 : 2)] != nullptr) osLat = (int) std::ceil (procOs[K == 2 ? 0 : (K == 4 ? 1 : 2)]->getLatencyInSamples());
+    latencyTarget = work / K + osLat;
     triggerAsyncUpdate();
 }
 
 // Straight-line tilt as its own last stage (after all bands and the split compressor)
-void MasteringEQAudioProcessor::designLine (double fs, int quality)
+void MasteringEQAudioProcessor::designLine (double fs, double fsw, int quality)
 {
     const auto t = readLine();
     if (! t.on) { latencyLine = 0; updateLatency(); return; }
     eqd::Band none[eqd::kMaxBands];                         // all bands off: only the tilt shapes the response
-    const auto r = eqd::design (none, eqd::kMaxBands, t, fs, quality, readMode());
+    const auto r = eqd::design (none, eqd::kMaxBands, t, fsw, quality, readMode());
     auto load = [&] (juce::dsp::Convolution& c, const std::vector<float>& v)
     {
         juce::AudioBuffer<float> b (1, (int) v.size());
@@ -223,8 +229,11 @@ void MasteringEQAudioProcessor::runDesign (int mask)
     const double fs = currentSampleRate.load();
     if (fs <= 0.0) return;
 
-    const int quality = (int) std::lround (apvts.getRawParameterValue ("quality")->load());
-    if (mask & 4) designLine (fs, quality);
+    const int K = 1 << juce::jlimit (0, 3, (int) std::lround (apvts.getRawParameterValue ("proc_os")->load()));
+    const double fsw = fs * (double) K;                       // rate at which the filters are designed and run
+    int quality = (int) std::lround (apvts.getRawParameterValue ("quality")->load());
+    while (quality > 0 && eqd::irLengthFor (fsw, quality) > (1 << 20)) --quality;   // keep the FFT size bounded at high rates
+    if (mask & 4) designLine (fs, fsw, quality);
     if (mask & 2)   // split-compressor band filter: same design engine and resolution as the EQ
     {
         static const int cs[4] { 6, 12, 24, 48 };
@@ -235,7 +244,7 @@ void MasteringEQAudioProcessor::runDesign (int mask)
         cb[0].on = cb[0].freq > 20.5;
         cb[1].type = eqd::BandType::LowPass;  cb[1].freq = get ("comp_hi"); cb[1].slopeDbOct = cs[juce::jlimit (0, 3, (int) std::lround (get ("comp_shi")))];
         cb[1].on = cb[1].freq < 19999.0;
-        const auto cr = eqd::design (cb, 2, eqd::Tilt{}, fs, quality, get ("comp_min") > 0.5f ? eqd::PhaseMode::Minimal : eqd::PhaseMode::Linear);
+        const auto cr = eqd::design (cb, 2, eqd::Tilt{}, fsw, quality, get ("comp_min") > 0.5f ? eqd::PhaseMode::Minimal : eqd::PhaseMode::Linear);
         for (auto* c : { &convCL, &convCR })
         {
             juce::AudioBuffer<float> b (1, (int) cr.ll.size());
@@ -248,7 +257,7 @@ void MasteringEQAudioProcessor::runDesign (int mask)
     }
     eqd::Band bands[eqd::kMaxBands];
     for (int i = 0; i < eqd::kMaxBands; ++i) bands[i] = readBand (i);
-    const auto res = eqd::design (bands, eqd::kMaxBands, readTilt(), fs, quality, readMode());
+    const auto res = eqd::design (bands, eqd::kMaxBands, readTilt(), fsw, quality, readMode());
 
     auto load = [&] (juce::dsp::Convolution& c, const std::vector<float>& v)
     {
@@ -273,6 +282,7 @@ void MasteringEQAudioProcessor::runDesign (int mask)
     }
     crossActive = res.crossActive;
     latencyEq = res.latencySamples;
+    activeK = K;
     updateLatency();
 }
 
@@ -286,15 +296,23 @@ void MasteringEQAudioProcessor::prepareToPlay (double sampleRate, int samplesPer
     maxBlock = std::max (samplesPerBlock, 64);
     currentSampleRate = sampleRate;
 
-    juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) maxBlock, 1 };
+    juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) maxBlock * 8, 1 };
     for (auto* c : { &convLL, &convLR, &convRL, &convRR }) { c->prepare (spec); c->reset(); }
 
-    for (auto* b : { &bufLL, &bufLR, &bufRL, &bufRR }) b->setSize (1, maxBlock, false, false, true);
+    for (auto* b : { &bufLL, &bufLR, &bufRL, &bufRR }) b->setSize (1, maxBlock * 8, false, false, true);
+    workIn.setSize (2, maxBlock * 8, false, false, true);
+    dsBuf.setSize (2, maxBlock, false, false, true);
+    for (int i = 0; i < 3; ++i)
+    {
+        procOs[i] = std::make_unique<juce::dsp::Oversampling<float>> (2, i + 1, juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple, true, false);
+        procOs[i]->initProcessing ((size_t) maxBlock);
+        procOs[i]->reset();
+    }
     dryBuf.setSize (2, maxBlock, false, false, true);
     tpScratch.setSize (2, maxBlock, false, false, true);
     inBuf.setSize (2, maxBlock, false, false, true);
-    compBufL.setSize (1, maxBlock, false, false, true);
-    compBufR.setSize (1, maxBlock, false, false, true);
+    compBufL.setSize (1, maxBlock * 8, false, false, true);
+    compBufR.setSize (1, maxBlock * 8, false, false, true);
 
     juce::dsp::ProcessSpec dspec { sampleRate, (juce::uint32) maxBlock, 2 };
     dryDelay.prepare (dspec);
@@ -431,7 +449,7 @@ void MasteringEQAudioProcessor::buildTruePeakKernel (int K)
 void MasteringEQAudioProcessor::runComp (float* L, float* R, int n)
 {
     auto get = [this] (const char* id) { return apvts.getRawParameterValue (id)->load(); };
-    const double fs = std::max (currentSampleRate.load(), 8000.0);
+    const double fs = std::max (currentSampleRate.load(), 8000.0) * (double) curK;
     const float thr = get ("comp_thr"), ratio = get ("comp_ratio"), knee = get ("comp_knee"), mk = get ("comp_mk");
     const float aC = std::exp (-1.0f / (std::max (get ("comp_att"), 0.05f) * 0.001f * (float) fs));
     const float rC = std::exp (-1.0f / (std::max (get ("comp_rel"), 1.0f) * 0.001f * (float) fs));
@@ -449,7 +467,7 @@ void MasteringEQAudioProcessor::runComp (float* L, float* R, int n)
     conv (convCL, compBufL);
     if (R) { std::copy (R, R + n, compBufR.getWritePointer (0)); conv (convCR, compBufR); }
 
-    compDelay.setDelay ((float) std::min (latencyComp.load(), 149000));
+    compDelay.setDelay ((float) std::min (latencyComp.load(), 1090000));
     auto gain = [&] (float det, float& st)
     {
         const float lvl = 20.0f * std::log10 (std::max (det, 1.0e-6f));
@@ -501,6 +519,8 @@ void MasteringEQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, 
     bypassSmooth.setTargetValue (apvts.getRawParameterValue ("bypass")->load() > 0.5f ? 1.0f : 0.0f);
     dryDelay.setDelay ((float) latencyTarget.load());
     const bool cross = crossActive.load() && numCh == 2;
+    const int K = std::max (1, activeK.load());
+    curK = K;
 
     for (int start = 0; start < total; start += maxBlock)
     {
@@ -519,43 +539,31 @@ void MasteringEQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, 
             }
         }
 
-        auto run = [n] (juce::dsp::Convolution& c, juce::AudioBuffer<float>& b)
+        // whole chain (split comp, EQ, straight tilt) at K x the host rate
+        const float *wetL, *wetR;
+        if (K == 1)
         {
-            juce::dsp::AudioBlock<float> blk (b);
-            auto sub = blk.getSubBlock (0, (size_t) n);
-            juce::dsp::ProcessContextReplacing<float> ctx (sub);
-            c.process (ctx);
-        };
-
-        const bool compOn = apvts.getRawParameterValue ("comp_on")->load() > 0.5f;
-        const bool compPost = apvts.getRawParameterValue ("comp_post")->load() > 0.5f;
-        if (compOn && ! compPost)
-            runComp (buffer.getWritePointer (0) + start, numCh == 2 ? buffer.getWritePointer (1) + start : nullptr, n);
-
-        bufLL.copyFrom (0, 0, buffer, 0, start, n);
-        run (convLL, bufLL);
-        if (numCh == 2)
-        {
-            bufRR.copyFrom (0, 0, buffer, 1, start, n);
-            run (convRR, bufRR);
-            if (cross)
-            {
-                bufLR.copyFrom (0, 0, buffer, 1, start, n);   // R -> L
-                bufRL.copyFrom (0, 0, buffer, 0, start, n);   // L -> R
-                run (convLR, bufLR);
-                run (convRL, bufRL);
-                bufLL.addFrom (0, 0, bufLR, 0, 0, n);
-                bufRR.addFrom (0, 0, bufRL, 0, 0, n);
-            }
+            for (int ch = 0; ch < 2; ++ch)
+                std::copy (buffer.getReadPointer (std::min (ch, numCh - 1)) + start, buffer.getReadPointer (std::min (ch, numCh - 1)) + start + n, workIn.getWritePointer (ch));
+            chain (workIn.getWritePointer (0), numCh == 2 ? workIn.getWritePointer (1) : nullptr, n, cross);
+            wetL = bufLL.getReadPointer (0);
+            wetR = bufRR.getReadPointer (0);
         }
-
-        if (compOn && compPost)
-            runComp (bufLL.getWritePointer (0), numCh == 2 ? bufRR.getWritePointer (0) : nullptr, n);
-
-        if (apvts.getRawParameterValue ("tilt_line")->load() > 0.5f)   // straight tilt, last stage
+        else
         {
-            run (convTL, bufLL);
-            if (numCh == 2) run (convTR, bufRR);
+            for (int ch = 0; ch < 2; ++ch)
+                std::copy (buffer.getReadPointer (std::min (ch, numCh - 1)) + start, buffer.getReadPointer (std::min (ch, numCh - 1)) + start + n, workIn.getWritePointer (ch));
+            auto& os = *procOs[K == 2 ? 0 : (K == 4 ? 1 : 2)];
+            juce::dsp::AudioBlock<const float> inBlk (workIn.getArrayOfReadPointers(), 2, (size_t) n);
+            auto up = os.processSamplesUp (inBlk);
+            const int nn = n * K;
+            chain (up.getChannelPointer (0), numCh == 2 ? up.getChannelPointer (1) : nullptr, nn, cross);
+            std::copy (bufLL.getReadPointer (0), bufLL.getReadPointer (0) + nn, up.getChannelPointer (0));
+            if (numCh == 2) std::copy (bufRR.getReadPointer (0), bufRR.getReadPointer (0) + nn, up.getChannelPointer (1));
+            juce::dsp::AudioBlock<float> dsBlk (dsBuf.getArrayOfWritePointers(), 2, (size_t) n);
+            os.processSamplesDown (dsBlk);
+            wetL = dsBuf.getReadPointer (0);
+            wetR = dsBuf.getReadPointer (1);
         }
 
         for (int i = 0; i < n; ++i)
@@ -565,7 +573,7 @@ void MasteringEQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, 
             float mono = 0.0f;
             for (int ch = 0; ch < numCh; ++ch)
             {
-                const float wet = (ch == 0 ? bufLL.getReadPointer (0)[i] : bufRR.getReadPointer (0)[i]) * g;
+                const float wet = (ch == 0 ? wetL[i] : wetR[i]) * g;
                 const float y = wet * (1.0f - bp) + dryBuf.getReadPointer (ch)[i] * bp;
                 buffer.getWritePointer (ch)[start + i] = y;
                 mono += y;
@@ -578,6 +586,44 @@ void MasteringEQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, 
         }
 
         updateMeters (buffer, start, n, numCh);
+    }
+}
+
+// Split comp (pre) -> EQ -> split comp (post) -> straight tilt, all at the working rate; result in bufLL / bufRR
+void MasteringEQAudioProcessor::chain (float* xL, float* xR, int nn, bool cross)
+{
+    auto run = [nn] (juce::dsp::Convolution& c, juce::AudioBuffer<float>& b)
+    {
+        juce::dsp::AudioBlock<float> blk (b);
+        auto sub = blk.getSubBlock (0, (size_t) nn);
+        juce::dsp::ProcessContextReplacing<float> ctx (sub);
+        c.process (ctx);
+    };
+    const bool compOn = apvts.getRawParameterValue ("comp_on")->load() > 0.5f;
+    const bool compPost = apvts.getRawParameterValue ("comp_post")->load() > 0.5f;
+    if (compOn && ! compPost) runComp (xL, xR, nn);
+
+    std::copy (xL, xL + nn, bufLL.getWritePointer (0));
+    run (convLL, bufLL);
+    if (xR != nullptr)
+    {
+        std::copy (xR, xR + nn, bufRR.getWritePointer (0));
+        run (convRR, bufRR);
+        if (cross)
+        {
+            std::copy (xR, xR + nn, bufLR.getWritePointer (0));   // R -> L
+            std::copy (xL, xL + nn, bufRL.getWritePointer (0));   // L -> R
+            run (convLR, bufLR);
+            run (convRL, bufRL);
+            bufLL.addFrom (0, 0, bufLR, 0, 0, nn);
+            bufRR.addFrom (0, 0, bufRL, 0, 0, nn);
+        }
+    }
+    if (compOn && compPost) runComp (bufLL.getWritePointer (0), xR != nullptr ? bufRR.getWritePointer (0) : nullptr, nn);
+    if (apvts.getRawParameterValue ("tilt_line")->load() > 0.5f)
+    {
+        run (convTL, bufLL);
+        if (xR != nullptr) run (convTR, bufRR);
     }
 }
 

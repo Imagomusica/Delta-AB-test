@@ -859,6 +859,9 @@ DuneContent::DuneContent (MasteringEQAudioProcessor& p) : proc (p), field (p, pa
     addAndMakeVisible (curvesTopBtn);
     addAndMakeVisible (lookBtn);
     addAndMakeVisible (osBox);
+    addAndMakeVisible (procOsBox);
+    fillCombo (proc.apvts, "proc_os", procOsBox);
+    procOsAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, "proc_os", procOsBox);
     addAndMakeVisible (lineBtn);
     for (auto* s : { &lineSlider, &linePivot })
     {
@@ -935,7 +938,7 @@ void DuneContent::timerCallback()
     comp.refresh();
 
     const double fs = std::max (proc.getSampleRate(), 1.0);
-    footerText = juce::String::fromUTF8 ("64-bit  \xC2\xB7  courbes analogiques exactes  \xC2\xB7  latence ")
+    footerText = juce::String::fromUTF8 ("64-bit  \xC2\xB7  latence ")
                  + juce::String ((double) proc.getLatencyForGui() / fs, 2) + " s";
     repaint (juce::Rectangle<int> (0, 0, (int) kW, 44));
     repaint (juce::Rectangle<int> (0, 754, (int) kW, 36));
@@ -957,6 +960,7 @@ void DuneContent::resized()
     field.setBounds (0, 45, (int) kW, 418);
     for (auto* b : { &curvesBtn, &curvesTopBtn, &lookBtn }) b->toFront (false);
     osBox.toFront (false);
+    procOsBox.setBounds (292, 761, 76, 24);
     lineBtn.setBounds (386, 761, 112, 24);
     lineSlider.setBounds (502, 761, 100, 24);
     linePivot.setBounds (690, 761, 80, 24);
@@ -1001,6 +1005,8 @@ void DuneContent::paint (juce::Graphics& g)
         g.drawText (pv >= 1000.0 ? juce::String (pv / 1000.0, 2) + " kHz" : juce::String ((int) pv) + " Hz", 774, 761, 80, 24, juce::Justification::centredLeft);
     }
     g.setColour (palette.dim);
+    g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 10.0f, juce::Font::bold)));
+    g.drawText ("OVERSAMPLING CALCUL", 160, 761, 130, 24, juce::Justification::centredRight);
     g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 11.0f, juce::Font::plain)));
     g.drawText (footerText, 16, 762, 600, 22, juce::Justification::centredLeft);
     g.setColour (palette.fg);
