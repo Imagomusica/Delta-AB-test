@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include "PluginEditor.h"
 
 namespace
@@ -181,6 +182,7 @@ DuneField::DuneField (MasteringEQAudioProcessor& p, const Palette& pl) : proc (p
     add (kLayers + 1, 1500);   // curve M
     add (kLayers + 2, 1500);   // curve S
     spectrum.fill (-120.0f);
+    demo = std::getenv ("DUNE_DEMO") != nullptr;
     meterPanel = { 14.0f, 10.0f, 530.0f, 72.0f };
     startTimerHz (30);
 }
@@ -208,8 +210,51 @@ void DuneField::updateAnalyzer()
 
 void DuneField::timerCallback()
 {
-    t += 0.027f;
+    if (demo)   // synthetic stereo music-like signal, only used for screenshots (DUNE_DEMO=1)
+    {
+        static int ph = 0;
+        for (int i = 0; i < 1024; ++i, ++ph)
+        {
+            const float s = (float) ph;
+            const float a = 0.22f * std::sin (s * 0.021f) + 0.12f * std::sin (s * 0.19f) + 0.06f * std::sin (s * 0.73f)
+                            + 0.04f * std::sin (s * 1.9f);
+            const float b = 0.20f * std::sin (s * 0.021f + 0.5f) + 0.10f * std::sin (s * 0.23f) + 0.05f * std::sin (s * 0.61f);
+            const int pos = proc.anaPos.load();
+            proc.anaL[(size_t) pos] = a; proc.anaR[(size_t) pos] = b; proc.anaBuf[(size_t) pos] = 0.5f * (a + b);
+            proc.anaPos.store ((pos + 1) % MasteringEQAudioProcessor::anaSize);
+        }
+        proc.meters[0].rms = -21.0f; proc.meters[1].rms = -22.0f; proc.meters[0].vu = -19.0f; proc.meters[1].vu = -20.0f;
+        proc.meters[0].ppm = -9.0f; proc.meters[1].ppm = -10.0f; proc.meters[0].truePeak = -6.0f; proc.meters[1].truePeak = -6.5f;
+    }
+
+    // level and transient energy drive the dunes
+    const float rmsDb = 0.5f * (proc.meters[0].rms.load() + proc.meters[1].rms.load());
+    const float ppmDb = 0.5f * (proc.meters[0].ppm.load() + proc.meters[1].ppm.load());
+    const float lvTarget = juce::jlimit (0.0f, 1.0f, (rmsDb + 60.0f) / 48.0f);
+    const float trTarget = juce::jlimit (0.0f, 1.0f, (ppmDb - rmsDb - 6.0f) / 12.0f);
+    level += (lvTarget - level) * (lvTarget > level ? 0.35f : 0.08f);
+    transient += (trTarget - transient) * (trTarget > transient ? 0.5f : 0.12f);
+    t += 0.02f + 0.07f * level;
     updateAnalyzer();
+
+    // goniometer points + correlation from the last samples
+    {
+        const int pos = proc.anaPos.load (std::memory_order_acquire);
+        const int n = 4096, shown = 700;
+        double sLR = 0.0, sLL = 0.0, sRR = 0.0;
+        float pk = 0.02f;
+        gonio.clear();
+        for (int i = 0; i < n; ++i)
+        {
+            const int idx = (pos - n + i + 4 * MasteringEQAudioProcessor::anaSize) % MasteringEQAudioProcessor::anaSize;
+            const float l = proc.anaL[(size_t) idx], r = proc.anaR[(size_t) idx];
+            sLR += (double) l * r; sLL += (double) l * l; sRR += (double) r * r;
+            pk = std::max (pk, std::max (std::abs (l), std::abs (r)));
+            if (i >= n - shown) gonio.push_back ({ (l - r) * 0.70711f, (l + r) * 0.70711f });
+        }
+        corr = (sLL > 1e-12 && sRR > 1e-12) ? (float) (sLR / std::sqrt (sLL * sRR)) : 0.0f;
+        gonioPeak += (pk - gonioPeak) * 0.2f;
+    }
 
     eqd::Band bands[eqd::kMaxBands];
     anyMS = false;
@@ -223,12 +268,37 @@ void DuneField::timerCallback()
     for (int i = 0; i < kPoints; ++i)
     {
         const double u = (double) i / (double) (kPoints - 1);
-        const double f = 10.0 * std::pow (3000.0, u);
+        const double f = 3.0 * std::pow (10000.0, u);
         dbL[(size_t) i] = (float) eqd::totalMagnitudeDb (bands, eqd::kMaxBands, eqd::Channel::Left, f, &tilt);
         dbM[(size_t) i] = (float) eqd::totalMagnitudeDb (bands, eqd::kMaxBands, eqd::Channel::Mid, f, nullptr) + dbL[(size_t) i];
         dbS[(size_t) i] = (float) eqd::totalMagnitudeDb (bands, eqd::kMaxBands, eqd::Channel::Side, f, nullptr) + dbL[(size_t) i];
         const int bin = juce::jlimit (1, fftSize / 2 - 1, (int) std::lround (f / fs * (double) fftSize));
         specN[(size_t) i] = juce::jlimit (0.0f, 1.0f, (spectrum[(size_t) bin] + 90.0f) / 70.0f);
+    }
+
+    // phase response of the EQ (analog-equivalent phase, unwrapped); linear mode has none
+    if (proc.readMode() == eqd::PhaseMode::Linear)
+    {
+        phaseDeg.fill (0.0f);
+    }
+    else
+    {
+        double prev = 0.0, off = 0.0;
+        for (int i = 0; i < kPoints; ++i)
+        {
+            const double f = 3.0 * std::pow (10000.0, (double) i / (double) (kPoints - 1));
+            eqd::cd A (1.0, 0.0);
+            for (int b = 0; b < eqd::kMaxBands; ++b)
+                if (bands[b].on && eqd::bandHitsGroup (bands[b], eqd::Channel::Left)) A *= eqd::bandResponse (bands[b], f);
+            double ph = std::arg (A);
+            if (i > 0)
+            {
+                while (ph + off - prev > eqd::kPi) off -= 2.0 * eqd::kPi;
+                while (ph + off - prev < -eqd::kPi) off += 2.0 * eqd::kPi;
+            }
+            prev = ph + off;
+            phaseDeg[(size_t) i] = (float) (prev * 180.0 / eqd::kPi);
+        }
     }
     repaint();
 }
@@ -236,10 +306,16 @@ void DuneField::timerCallback()
 void DuneField::paint (juce::Graphics& g)
 {
     const float W = (float) getWidth(), H = (float) getHeight();
+    const float stripH = 120.0f, Hm = H - stripH;
     g.fillAll (pal.bg);
+
+    const bool showCurves = proc.apvts.getRawParameterValue ("curves_on")->load() > 0.5f || std::getenv ("DUNE_CURVES") != nullptr;
+    const bool curvesTop  = proc.apvts.getRawParameterValue ("curves_top")->load() > 0.5f;
 
     juce::RectangleList<float> bright, mid, faint, curveM, curveS;
     const float dot = 1.35f;
+    const float specGain = 0.10f + 0.22f * level;          // the dunes move with the music
+    const float jitterGain = 1.0f + 1.5f * transient;
     for (const auto& p : particles)
     {
         float y;
@@ -247,52 +323,119 @@ void DuneField::paint (juce::Graphics& g)
         {
             const float b = ((float) p.layer + 0.5f) / (float) kLayers;
             const float l = (float) p.layer;
-            // clumping: dunes are denser on some stretches than on others
             if (std::sin (p.u * 11.0f + l * 2.3f + t * 0.15f) + p.h * 1.5f < 0.05f) continue;
             const float n = std::sin (p.u * 6.0f + l * 1.7f + t * 0.35f) + 0.6f * std::sin (p.u * 15.0f + l * 2.9f - t * 0.5f)
                             + 0.3f * std::sin (p.u * 37.0f + l * 0.9f + t * 0.9f);
             const float slope = ((p.layer & 1) ? 1.0f : -1.0f) * (p.u - 0.5f) * 0.30f + 0.08f * std::sin (l * 1.3f);
             const float wl = 0.35f + 0.65f * (1.0f - std::abs (2.0f * b - 1.0f));
             const float resp = -lookup (dbL, p.u) / 18.0f * 0.22f * wl;
-            const float spec = -lookup (specN, p.u) * 0.10f;
-            y = H * (b + 0.06f * n + slope + resp + spec) + p.jy * (2.5f + 6.0f * p.h);
-            if (y < 0.0f || y > H) continue;
+            const float spec = -lookup (specN, p.u) * specGain;
+            y = Hm * (b + 0.06f * n * (1.0f + 0.6f * level) + slope + resp + spec) + p.jy * (2.5f + 6.0f * p.h) * jitterGain;
+            if (y < 0.0f || y > Hm) continue;
             juce::Rectangle<float> r (p.u * W, y, dot, dot);
             if (p.h > 0.88f) mid.addWithoutMerging (r); else faint.addWithoutMerging (r);
         }
-        else
+        else if (showCurves)
         {
             const int c = p.layer - kLayers;
             if (c > 0 && ! anyMS) continue;
             const auto& arr = c == 0 ? dbL : (c == 1 ? dbM : dbS);
-            y = H * 0.5f - lookup (arr, p.u) / 18.0f * H * 0.42f + p.jy * (c == 0 ? 1.5f : 1.1f);
-            if (y < 0.0f || y > H) continue;
+            y = Hm * 0.5f - lookup (arr, p.u) / 18.0f * Hm * 0.42f + p.jy * (c == 0 ? 2.2f : 1.6f);   // grains, not a clean line
+            if (y < 0.0f || y > Hm) continue;
             juce::Rectangle<float> r (p.u * W, y, dot * 1.15f, dot * 1.15f);
             if (c == 0) bright.addWithoutMerging (r); else if (c == 1) curveM.addWithoutMerging (r); else curveS.addWithoutMerging (r);
         }
     }
-    g.setColour (pal.fg.withAlpha (0.30f));
+    auto drawCurves = [&]
+    {
+        g.setColour (pal.fg.withAlpha (0.8f));
+        g.fillRectList (curveM);
+        g.fillRectList (curveS);
+        g.setColour (pal.fg);
+        g.fillRectList (bright);
+    };
+    if (showCurves && ! curvesTop) drawCurves();
+    g.setColour (pal.fg.withAlpha (0.28f + 0.30f * level));
     g.fillRectList (faint);
-    g.setColour (pal.fg.withAlpha (0.62f));
+    g.setColour (pal.fg.withAlpha (0.60f + 0.25f * level));
     g.fillRectList (mid);
-    g.setColour (pal.fg.withAlpha (0.8f));
-    g.fillRectList (curveM);
-    g.fillRectList (curveS);
-    g.setColour (pal.fg);
-    g.fillRectList (bright);
+    if (showCurves && curvesTop) drawCurves();
 
-    // frequency hints
+    // frequency / dB hints
     g.setColour (pal.dim.withAlpha (0.7f));
     g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 10.0f, juce::Font::plain)));
-    for (double f : { 20.0, 100.0, 1000.0, 10000.0 })
+    for (double f : { 3.0, 10.0, 100.0, 1000.0, 10000.0 })
     {
-        const float x = (float) (std::log (f / 10.0) / std::log (3000.0)) * W;
+        const float x = (float) (std::log (f / 3.0) / std::log (10000.0)) * W;
         g.drawText (f >= 1000.0 ? juce::String ((int) (f / 1000.0)) + "k" : juce::String ((int) f),
-                    (int) x - 16, (int) H - 15, 32, 12, juce::Justification::centred);
+                    juce::jlimit (0, (int) W - 32, (int) x - 16), (int) Hm - 15, 32, 12, juce::Justification::centred);
     }
-    g.drawText ("+18 dB", (int) W - 56, (int) (H * 0.08f) - 6, 50, 12, juce::Justification::right);
-    g.drawText ("0 dB", (int) W - 56, (int) (H * 0.5f) - 6, 50, 12, juce::Justification::right);
-    g.drawText ("-18 dB", (int) W - 56, (int) (H * 0.92f) - 6, 50, 12, juce::Justification::right);
+    if (showCurves)
+    {
+        g.drawText ("+18 dB", (int) W - 56, (int) (Hm * 0.08f) - 6, 50, 12, juce::Justification::right);
+        g.drawText ("0 dB", (int) W - 56, (int) (Hm * 0.5f) - 6, 50, 12, juce::Justification::right);
+        g.drawText ("-18 dB", (int) W - 56, (int) (Hm * 0.92f) - 6, 50, 12, juce::Justification::right);
+    }
+
+    // ---- phase strip (oscilloscope style): EQ phase response + stereo goniometer
+    g.setColour (pal.ring);
+    g.drawHorizontalLine ((int) Hm, 0.0f, W);
+    const float cy = Hm + stripH * 0.5f, ph = stripH * 0.5f - 14.0f;
+    const float gonioW = 170.0f, plotW = W - gonioW;
+    g.setColour (pal.ring.withAlpha (0.6f));
+    g.drawHorizontalLine ((int) cy, 0.0f, plotW);
+    g.setColour (pal.dim);
+    g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 9.5f, juce::Font::bold)));
+    g.drawText ("PHASE", 50, (int) Hm + 4, 60, 12, juce::Justification::left);
+    g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 9.0f, juce::Font::plain)));
+    g.drawText ("+180", 12, (int) (cy - ph) - 6, 40, 12, juce::Justification::left);
+    g.drawText ("0", 12, (int) cy - 6, 40, 12, juce::Justification::left);
+    g.drawText ("-180", 12, (int) (cy + ph) - 6, 40, 12, juce::Justification::left);
+
+    const bool linear = proc.readMode() == eqd::PhaseMode::Linear;
+    juce::RectangleList<float> phaseDots;
+    for (int i = 0; i < kPoints; ++i)
+    {
+        float d = phaseDeg[(size_t) i];
+        d = std::fmod (d + 180.0f, 360.0f); if (d < 0.0f) d += 360.0f; d -= 180.0f;      // wrapped to +-180
+        const float x = (float) i / (float) (kPoints - 1) * plotW;
+        phaseDots.addWithoutMerging ({ x, cy - d / 180.0f * ph, 1.6f, 1.6f });
+    }
+    g.setColour (pal.fg.withAlpha (0.85f));
+    g.fillRectList (phaseDots);
+    if (linear)
+    {
+        g.setColour (pal.dim);
+        g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 10.0f, juce::Font::italic)));
+        g.drawText (juce::String::fromUTF8 ("LINEAIRE : phase nulle, aucun d\xC3\xA9phasage"), (int) (plotW * 0.5f) - 130, (int) cy - 18, 260, 12,
+                    juce::Justification::centred);
+    }
+
+    // goniometer
+    const float gx = W - gonioW * 0.5f, gy = cy, gs = 46.0f;
+    g.setColour (pal.ring);
+    g.drawVerticalLine ((int) (W - gonioW), Hm, H);
+    g.drawRect (gx - gs, gy - gs, gs * 2.0f, gs * 2.0f, 1.0f);
+    g.setColour (pal.ring.withAlpha (0.6f));
+    g.drawLine (gx - gs, gy, gx + gs, gy, 1.0f);
+    g.drawLine (gx, gy - gs, gx, gy + gs, 1.0f);
+    const float sc = gs * 0.92f / (1.4142f * std::max (gonioPeak, 0.02f));
+    juce::RectangleList<float> gd;
+    for (const auto& q : gonio)
+    {
+        const float px = gx + juce::jlimit (-gs, gs, q.x * sc), py = gy - juce::jlimit (-gs, gs, q.y * sc);
+        gd.addWithoutMerging ({ px, py, 1.4f, 1.4f });
+    }
+    g.setColour (pal.fg.withAlpha (0.75f));
+    g.fillRectList (gd);
+    g.setColour (pal.dim);
+    g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 9.0f, juce::Font::plain)));
+    g.drawText ("L", (int) (gx - gs) - 12, (int) (gy - gs) - 2, 12, 12, juce::Justification::centred);
+    g.drawText ("R", (int) (gx + gs), (int) (gy - gs) - 2, 12, 12, juce::Justification::centred);
+    g.setColour (pal.fg);
+    g.setFont (juce::Font (juce::FontOptions (juce::Font::getDefaultMonospacedFontName(), 10.0f, juce::Font::plain)));
+    g.drawText ("CORR " + juce::String (corr >= 0.0f ? "+" : "") + juce::String (corr, 2), (int) (W - gonioW) + 4, (int) (H - 14), (int) gonioW - 8, 12,
+                juce::Justification::centred);
 
     drawMeters (g);
 }
@@ -478,6 +621,10 @@ DuneContent::DuneContent (MasteringEQAudioProcessor& p) : proc (p), field (p, pa
 
     addAndMakeVisible (tiltBtn);
     addAndMakeVisible (bypassBtn);
+    addAndMakeVisible (curvesBtn);
+    addAndMakeVisible (curvesTopBtn);
+    curvesAtt    = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, "curves_on", curvesBtn);
+    curvesTopAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, "curves_top", curvesTopBtn);
     tiltAtt   = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, "tilt_on", tiltBtn);
     bypassAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, "bypass", bypassBtn);
 
@@ -533,6 +680,8 @@ void DuneContent::timerCallback()
     const int mode = (int) std::lround (paramValue (proc.apvts, "mode"));
     for (int i = 0; i < 3; ++i) modeBtn[i].setToggleState (i == mode, juce::dontSendNotification);
     for (auto& s : strips) s->refresh();
+    curvesTopBtn.setButtonText (curvesTopBtn.getToggleState() ? "DESSUS" : "DESSOUS");
+    curvesTopBtn.setEnabled (curvesBtn.getToggleState());
 
     const double fs = std::max (proc.getSampleRate(), 1.0);
     footerText = juce::String::fromUTF8 ("64-bit  \xC2\xB7  courbes analogiques exactes  \xC2\xB7  latence ")
@@ -555,6 +704,9 @@ void DuneContent::resized()
     bypassBtn.setBounds (1152, y, 76, h);
 
     field.setBounds (0, 45, (int) kW, 418);
+    curvesBtn.toFront (false); curvesTopBtn.toFront (false);
+    curvesBtn.setBounds (930, 53, 92, 22);
+    curvesTopBtn.setBounds (1028, 53, 92, 22);
     for (int i = 0; i < eqd::kMaxBands; ++i) strips[(size_t) i]->setBounds (150 * i, 465, 150, 287);
     plusBtn.setBounds (1206, 475, 28, 28);
     minusBtn.setBounds (1206, 515, 28, 28);

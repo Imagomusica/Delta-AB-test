@@ -53,7 +53,10 @@ private:
     std::vector<Particle> particles;
     static constexpr int kPoints = 512;
     static constexpr int kLayers = 16;
-    std::array<float, kPoints> dbL {}, dbM {}, dbS {}, specN {};
+    std::array<float, kPoints> dbL {}, dbM {}, dbS {}, specN {}, phaseDeg {};
+    float level = 0.0f, transient = 0.0f, corr = 0.0f, gonioPeak = 0.1f;
+    bool demo = false;
+    std::vector<juce::Point<float>> gonio;
     bool anyMS = false;
     float t = 0.0f;
     juce::Rectangle<float> meterPanel;
@@ -112,13 +115,14 @@ private:
 
     juce::TextButton modeBtn[3];
     juce::ComboBox qualityBox, tuningBox, themeBox;
+    juce::TextButton curvesBtn { "COURBES" }, curvesTopBtn { "DESSUS" };
     juce::TextButton tiltBtn { "TILT" }, bypassBtn { "BYPASS" }, plusBtn { "+" }, minusBtn { "-" };
     juce::Slider tiltSlider, outSlider;
     DuneField field;
     std::vector<std::unique_ptr<BandStrip>> strips;
 
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> qualityAtt, tuningAtt, themeAtt;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> tiltAtt, bypassAtt;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> tiltAtt, bypassAtt, curvesAtt, curvesTopAtt;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> tiltSliderAtt, outAtt;
     juce::String footerText;
     int lastTheme = -1;

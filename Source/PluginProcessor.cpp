@@ -57,6 +57,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout MasteringEQAudioProcessor::c
                                                        NormalisableRange<float> (-18.0f, 18.0f, 0.1f), 0.0f,
                                                        AudioParameterFloatAttributes().withLabel ("dB")));
     layout.add (std::make_unique<AudioParameterBool> (ParameterID { "bypass", 1 }, "Bypass", false));
+    layout.add (std::make_unique<AudioParameterBool> (ParameterID { "curves_on", 1 }, "Show EQ curves", false));
+    layout.add (std::make_unique<AudioParameterBool> (ParameterID { "curves_top", 1 }, "Curves above sand", true));
 
     layout.add (std::make_unique<AudioParameterBool>  (ParameterID { "tilt_on", 1 }, "Tilt On", false));
     layout.add (std::make_unique<AudioParameterFloat> (ParameterID { "tilt_db", 1 }, "Tilt",
@@ -77,7 +79,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout MasteringEQAudioProcessor::c
         layout.add (std::make_unique<AudioParameterBool>   (ParameterID { pid (i, "on"), 1 },    n + "On", i < 7));
         layout.add (std::make_unique<AudioParameterChoice> (ParameterID { pid (i, "type"), 1 },  n + "Type", types, kDefType[i]));
         layout.add (std::make_unique<AudioParameterFloat>  (ParameterID { pid (i, "freq"), 1 },  n + "Frequency",
-                                                            logRange (10.0f, 30000.0f), (float) kDefFreq[i],
+                                                            logRange (3.0f, 30000.0f), (float) kDefFreq[i],
                                                             AudioParameterFloatAttributes()
                                                                 .withStringFromValueFunction ([] (float v, int)
                                                                     { return v >= 1000.0f ? String (v / 1000.0f, 2) + " kHz" : String (v, 1) + " Hz"; })
@@ -322,6 +324,8 @@ void MasteringEQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, 
             }
             const int pos = anaPos.load (std::memory_order_relaxed);
             anaBuf[(size_t) pos] = mono / (float) numCh;
+            anaL[(size_t) pos] = buffer.getReadPointer (0)[start + i];
+            anaR[(size_t) pos] = buffer.getReadPointer (numCh - 1)[start + i];
             anaPos.store ((pos + 1) % anaSize, std::memory_order_release);
         }
 

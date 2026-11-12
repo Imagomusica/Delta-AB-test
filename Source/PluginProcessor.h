@@ -50,6 +50,7 @@ public:
     int getLatencyForGui() const { return latencyTarget.load(); }
     static constexpr int anaSize = 16384;
     std::array<float, anaSize> anaBuf {};
+    std::array<float, anaSize> anaL {}, anaR {};
     std::atomic<int> anaPos { 0 };
 
     // ---- modulometer (dBFS values, per channel)
