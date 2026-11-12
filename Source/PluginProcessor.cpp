@@ -216,7 +216,7 @@ void MasteringEQAudioProcessor::designLine (double fs, double fsw, int quality)
     if (! t.on) { latencyLine = 0; updateLatency(); return; }
     eqd::Band none[eqd::kMaxBands];                         // all bands off: only the tilt shapes the response
     const auto r = eqd::design (none, eqd::kMaxBands, t, fsw, quality, readMode());
-    auto load = [&] (juce::dsp::Convolution& c, const std::vector<float>& v)
+    auto load = [&] (HotConv& c, const std::vector<float>& v)
     {
         juce::AudioBuffer<float> b (1, (int) v.size());
         std::copy (v.begin(), v.end(), b.getWritePointer (0));
@@ -264,7 +264,7 @@ void MasteringEQAudioProcessor::runDesign (int mask)
     for (int i = 0; i < eqd::kMaxBands; ++i) bands[i] = readBand (i);
     const auto res = eqd::design (bands, eqd::kMaxBands, readTilt(), fsw, quality, readMode());
 
-    auto load = [&] (juce::dsp::Convolution& c, const std::vector<float>& v)
+    auto load = [&] (HotConv& c, const std::vector<float>& v)
     {
         juce::AudioBuffer<float> b (1, (int) v.size());
         std::copy (v.begin(), v.end(), b.getWritePointer (0));
@@ -469,7 +469,7 @@ void MasteringEQAudioProcessor::runComp (float* L, float* R, int n)
     const int ms = (int) std::lround (get ("comp_ms"));
     const float slope = 1.0f / std::max (ratio, 1.0f) - 1.0f;
 
-    auto conv = [n] (juce::dsp::Convolution& c, juce::AudioBuffer<float>& b)
+    auto conv = [n] (HotConv& c, juce::AudioBuffer<float>& b)
     {
         juce::dsp::AudioBlock<float> blk (b);
         auto sub = blk.getSubBlock (0, (size_t) n);
@@ -606,7 +606,7 @@ void MasteringEQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, 
 // Split comp (pre) -> EQ -> split comp (post) -> straight tilt, all at the working rate; result in bufLL / bufRR
 void MasteringEQAudioProcessor::chain (float* xL, float* xR, int nn, bool cross)
 {
-    auto run = [nn] (juce::dsp::Convolution& c, juce::AudioBuffer<float>& b)
+    auto run = [nn] (HotConv& c, juce::AudioBuffer<float>& b)
     {
         juce::dsp::AudioBlock<float> blk (b);
         auto sub = blk.getSubBlock (0, (size_t) nn);

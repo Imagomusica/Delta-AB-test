@@ -7,6 +7,7 @@
 #include "EqDesign.h"
 #include "Loudness.h"
 #include "Resampler.h"
+#include "HotConv.h"
 #include <memory>
 
 class MasteringEQAudioProcessor : public juce::AudioProcessor,
@@ -101,7 +102,7 @@ private:
 
     DesignThread designThread { *this };
 
-    juce::dsp::Convolution convLL, convLR, convRL, convRR;
+    HotConv convLL, convLR, convRL, convRR;
     juce::AudioBuffer<float> bufLL, bufLR, bufRL, bufRR, dryBuf, tpScratch, inBuf;
     juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::None> dryDelay { 300000 };
     juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::None> compDelay { 1100000 };
@@ -112,7 +113,7 @@ private:
     juce::AudioBuffer<float> workIn, dsBuf;
     std::atomic<int> activeK { 1 };
     int curK = 1;
-    juce::dsp::Convolution convCL, convCR, convTL, convTR;   // convT*: straight-line tilt, last stage                 // split-compressor band filter
+    HotConv convCL, convCR, convTL, convTR;   // convT*: straight-line tilt, last stage                 // split-compressor band filter
     juce::AudioBuffer<float> compBufL, compBufR;
     std::atomic<int> latencyEq { 0 }, latencyComp { 0 }, latencyLine { 0 };
     float compState[2] { 0.0f, 0.0f };
