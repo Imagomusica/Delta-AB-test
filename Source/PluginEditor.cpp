@@ -1,3 +1,4 @@
+#include <cstring>
 #include <cstdlib>
 #include "PluginEditor.h"
 
@@ -183,7 +184,7 @@ DuneField::DuneField (MasteringEQAudioProcessor& p, const Palette& pl) : proc (p
     add (kLayers + 2, 1500);   // curve S
     spectrum.fill (-120.0f);
     demo = std::getenv ("DUNE_DEMO") != nullptr;
-    meterPanel = { 14.0f, 10.0f, 530.0f, 72.0f };
+    meterPanel = { 14.0f, 10.0f, 640.0f, 200.0f };
     startTimerHz (30);
 }
 
@@ -224,6 +225,9 @@ void DuneField::timerCallback()
             proc.anaPos.store ((pos + 1) % MasteringEQAudioProcessor::anaSize);
         }
         proc.meters[0].rms = -21.0f; proc.meters[1].rms = -22.0f; proc.meters[0].vu = -19.0f; proc.meters[1].vu = -20.0f;
+        proc.inLoud.momentary = -17.0f; proc.inLoud.shortTerm = -18.2f; proc.inLoud.integrated = -18.6f;
+        proc.outLoud.momentary = -16.1f; proc.outLoud.shortTerm = -17.4f; proc.outLoud.integrated = -17.8f;
+        proc.inRmsDb = -22.0f; proc.inPeakDb = -4.2f;
         proc.meters[0].ppm = -9.0f; proc.meters[1].ppm = -10.0f; proc.meters[0].truePeak = -6.0f; proc.meters[1].truePeak = -6.5f;
     }
 
@@ -301,6 +305,44 @@ void DuneField::timerCallback()
         }
     }
     repaint();
+}
+
+void NagraSwitch::paintButton (juce::Graphics& g, bool highlighted, bool)
+{
+    const auto b = getLocalBounds().toFloat();
+    const float d = std::min (b.getHeight(), 26.0f);
+    const juce::Point<float> c (b.getX() + d * 0.5f + 1.0f, b.getCentreY());
+    const bool on = getToggleState();
+
+    // recessed bezel
+    g.setGradientFill (juce::ColourGradient (pal.fg.withAlpha (0.55f), c.x, c.y - d * 0.5f, pal.fg.withAlpha (0.12f), c.x, c.y + d * 0.5f, false));
+    g.fillEllipse (c.x - d * 0.5f, c.y - d * 0.5f, d, d);
+    g.setColour (pal.bg);
+    g.fillEllipse (c.x - d * 0.5f + 2.5f, c.y - d * 0.5f + 2.5f, d - 5.0f, d - 5.0f);
+    g.setColour (pal.ring);
+    g.drawEllipse (c.x - d * 0.5f + 2.5f, c.y - d * 0.5f + 2.5f, d - 5.0f, d - 5.0f, 1.0f);
+
+    // lever (brushed metal), up = ON, down = OFF
+    const float len = d * 0.40f, w = 6.0f;
+    const float ty = on ? c.y - len : c.y + len;
+    juce::Path lever;
+    lever.addRoundedRectangle (c.x - w * 0.5f, std::min (c.y, ty) - 1.0f, w, len + 2.0f, 2.5f);
+    g.setGradientFill (juce::ColourGradient (pal.fg.withAlpha (0.35f), c.x - w * 0.5f, c.y, pal.fg, c.x + w * 0.5f, c.y, false));
+    g.fillPath (lever);
+    g.setColour (pal.fg);
+    g.fillEllipse (c.x - 4.0f, ty - 4.0f, 8.0f, 8.0f);                       // lever tip
+    g.setColour (pal.bg.withAlpha (0.5f));
+    g.fillEllipse (c.x - 1.5f, ty - 2.2f, 2.2f, 2.2f);                        // highlight
+
+    g.setColour (on ? pal.fg : pal.dim);
+    g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 11.0f, on ? juce::Font::bold : juce::Font::plain)));
+    g.drawText (label.isEmpty() ? getButtonText() : label, (int) (c.x + d * 0.5f + 6.0f), (int) b.getY(),
+                (int) (b.getRight() - c.x - d * 0.5f - 6.0f), (int) b.getHeight(), juce::Justification::centredLeft);
+    if (highlighted)
+    {
+        g.setColour (pal.fg.withAlpha (0.25f));
+        g.drawEllipse (c.x - d * 0.5f, c.y - d * 0.5f, d, d, 1.0f);
+    }
 }
 
 void DuneField::paint (juce::Graphics& g)
@@ -442,44 +484,147 @@ void DuneField::paint (juce::Graphics& g)
 
 void DuneField::drawMeters (juce::Graphics& g)
 {
-    g.setColour (pal.bg.withAlpha (0.78f));
-    g.fillRect (meterPanel);
+    const auto P = meterPanel;
+    g.setColour (pal.bg.withAlpha (0.84f));
+    g.fillRect (P);
     g.setColour (pal.ring);
-    g.drawRect (meterPanel, 1.0f);
+    g.drawRect (P, 1.0f);
 
+    auto fnum = [] (float v, int dp = 1) { return v <= -99.0f ? juce::String ("--") : juce::String (v, dp); };
+    auto fdiff = [] (float a, float b)
+    {
+        if (a <= -99.0f || b <= -99.0f) return juce::String ("--");
+        const float d = b - a; return (d > 0.05f ? juce::String ("+") : juce::String()) + juce::String (d, 1);
+    };
+
+    // ---------------- amber modulometer (arc window, two needles)
+    const juce::Point<float> pivot (P.getX() + 135.0f, P.getY() + 182.0f);
+    const float R = 150.0f, r = 106.0f, span = 46.0f;
+    auto ang = [&] (float db) { return juce::degreesToRadians (-span + 2.0f * span * juce::jlimit (0.0f, 1.0f, (db + 40.0f) / 43.0f)); };
+    auto pt = [&] (float radius, float a) { return juce::Point<float> (pivot.x + radius * std::sin (a), pivot.y - radius * std::cos (a)); };
+
+    juce::Path win;
+    win.addCentredArc (pivot.x, pivot.y, R, R, 0.0f, juce::degreesToRadians (-span), juce::degreesToRadians (span), true);
+    win.addCentredArc (pivot.x, pivot.y, r, r, 0.0f, juce::degreesToRadians (span), juce::degreesToRadians (-span), false);
+    win.closeSubPath();
+    {
+        juce::Graphics::ScopedSaveState ss (g);
+        g.reduceClipRegion (P.toNearestInt());
+        g.setGradientFill (juce::ColourGradient (juce::Colour (0xfff6b94a), pivot.x, pivot.y - R, juce::Colour (0xffd98a1c), pivot.x, pivot.y - r + 20.0f, false));
+        g.fillPath (win);
+        g.setColour (juce::Colour (0xff3a1a08));
+        g.strokePath (win, juce::PathStrokeType (1.0f));
+
+        // scale
+        g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 9.0f, juce::Font::plain)));
+        for (float db : { -40.0f, -30.0f, -20.0f, -10.0f, -6.0f, -3.0f, 0.0f, 3.0f })
+        {
+            const float a = ang (db);
+            g.setColour (db >= 0.0f ? juce::Colour (0xffa11a14) : juce::Colour (0xff3a1a08));
+            g.drawLine ({ pt (R - 12.0f, a), pt (R - 2.0f, a) }, db == 0.0f ? 2.0f : 1.2f);
+            const auto tp = pt (R - 22.0f, a);
+            g.drawText (db > 0.0f ? "+" + juce::String ((int) db) : juce::String ((int) db), (int) tp.x - 14, (int) tp.y - 6, 28, 12, juce::Justification::centred);
+        }
+        for (float db = -40.0f; db < 3.0f; db += 2.0f)
+            g.drawLine ({ pt (R - 7.0f, ang (db)), pt (R - 2.0f, ang (db)) }, 0.7f);
+        g.setColour (juce::Colour (0xff3a1a08));
+        g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 10.5f, juce::Font::bold)));
+        g.drawText ("MODULOMETER", (int) pivot.x - 60, (int) (pivot.y - R + 30.0f), 120, 14, juce::Justification::centred);
+        g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 8.5f, juce::Font::plain)));
+        g.drawText ("dBFS", (int) pt (R - 24.0f, ang (3.0f)).x - 12, (int) pt (R - 24.0f, ang (3.0f)).y + 8, 28, 10, juce::Justification::centred);
+
+        // needles, clipped to the arc window like on the Nagra
+        g.reduceClipRegion (win);
+        const float ppm = std::max (proc.meters[0].ppm.load(), proc.meters[1].ppm.load());
+        const float vu  = std::max (proc.meters[0].vu.load(),  proc.meters[1].vu.load());
+        g.setColour (juce::Colour (0xff111111));
+        g.drawLine ({ pt (r - 6.0f, ang (vu)), pt (R + 2.0f, ang (vu)) }, 1.6f);
+        g.setColour (juce::Colour (0xffc0201a));
+        g.drawLine ({ pt (r - 6.0f, ang (ppm)), pt (R + 2.0f, ang (ppm)) }, 1.6f);
+    }
     g.setColour (pal.dim);
-    g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 9.5f, juce::Font::bold)));
-    g.drawText ("MODULOMETRE   VU / PPM / RMS / TRUE PEAK   (clic : reset crete)", (int) meterPanel.getX() + 10, (int) meterPanel.getY() + 5, 500, 12,
+    g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 9.5f, juce::Font::plain)));
+    g.drawText (juce::String::fromUTF8 ("\xE2\x94\x80 rouge : PEAK    \xE2\x94\x80 noir : VU lent  (clic : reset)"), (int) P.getX() + 8, (int) P.getY() + 128, 270, 12,
                 juce::Justification::left);
 
+    // ---------------- readouts: input / output / difference
+    const float tx = P.getX() + 292.0f;
+    const float colX[4] { tx, tx + 80.0f, tx + 160.0f, tx + 240.0f };
     auto mono = juce::Font (juce::FontOptions (juce::Font::getDefaultMonospacedFontName(), 10.5f, juce::Font::plain));
-    auto num = [] (float v) { return v <= -100.0f ? juce::String ("  --") : juce::String (v, 1); };
-    const float bx = meterPanel.getX() + 28.0f, bw = 170.0f;
-    auto vuToX = [&] (float vu) { return bx + bw * juce::jlimit (0.0f, 1.0f, (vu + 20.0f) / 23.0f); };
+    auto small = juce::Font (juce::FontOptions ("Helvetica Neue", 9.5f, juce::Font::bold));
+    float y = P.getY() + 6.0f;
+    g.setColour (pal.dim);
+    g.setFont (small);
+    g.drawText ("MODULOMETRE", (int) tx, (int) y, 150, 12, juce::Justification::left);
+    const double gainDb = proc.apvts.getRawParameterValue ("out")->load();
+    g.drawText ("ENTREE", (int) colX[1], (int) y, 70, 12, juce::Justification::right);
+    g.drawText ("SORTIE", (int) colX[2], (int) y, 70, 12, juce::Justification::right);
+    g.drawText ("DIFF", (int) colX[3], (int) y, 70, 12, juce::Justification::right);
 
-    for (int ch = 0; ch < 2; ++ch)
+    const float outL = std::max (proc.meters[0].rms.load(), proc.meters[1].rms.load());
+    const float outRms = 10.0f * std::log10 (0.5f * (std::pow (10.0f, proc.meters[0].rms.load() / 10.0f) + std::pow (10.0f, proc.meters[1].rms.load() / 10.0f)));
+    juce::ignoreUnused (outL);
+    const float inPk = proc.inPeakDb.load();
+    const float outTp = std::max (proc.meters[0].truePeak.load(), proc.meters[1].truePeak.load());
+    const float inI = proc.inLoud.integrated.load(), outI = proc.outLoud.integrated.load();
+
+    struct Row { const char* name; float in, out; };
+    const Row rows[] {
+        { "RMS dBFS", proc.inRmsDb.load(), outRms },
+        { "LUFS-M",   proc.inLoud.momentary.load(), proc.outLoud.momentary.load() },
+        { "LUFS-C",   proc.inLoud.shortTerm.load(), proc.outLoud.shortTerm.load() },
+        { "LUFS-I",   inI, outI },
+        { "PEAK/TP",  inPk, outTp },
+        { "DR (PLR)", (inPk > -99.0f && inI > -99.0f) ? inPk - inI : -120.0f, (outTp > -99.0f && outI > -99.0f) ? outTp - outI : -120.0f },
+    };
+    y += 16.0f;
+    for (const auto& rw : rows)
     {
-        const float y = meterPanel.getY() + 22.0f + (float) ch * 22.0f;
-        const float vu = proc.meters[ch].vu.load(), ppm = proc.meters[ch].ppm.load();
-        const float rms = proc.meters[ch].rms.load(), tp = proc.meters[ch].truePeak.load();
-
         g.setColour (pal.dim);
-        g.setFont (mono);
-        g.drawText (ch == 0 ? "L" : "R", (int) meterPanel.getX() + 10, (int) y, 14, 14, juce::Justification::centred);
-        g.setColour (pal.ring);
-        g.drawRect (bx, y + 2.0f, bw, 10.0f, 1.0f);
-        g.setColour (pal.fg);
-        g.fillRect (bx, y + 2.0f, vuToX (vu + 18.0f) - bx, 10.0f);              // VU bar (0 VU = -18 dBFS)
-        g.setColour (pal.dim);
-        g.drawLine (vuToX (0.0f), y, vuToX (0.0f), y + 14.0f, 1.0f);              // 0 VU mark
-        g.setColour (pal.fg);
-        g.fillRect (vuToX (ppm + 18.0f) - 1.0f, y, 2.0f, 14.0f);                 // PPM marker
-
+        g.setFont (small);
+        g.drawText (rw.name, (int) colX[0], (int) y, 80, 14, juce::Justification::left);
         g.setColour (pal.fg);
         g.setFont (mono);
-        g.drawText ("VU " + num (vu + 18.0f) + "  RMS " + num (rms) + "  PPM " + num (ppm) + "  TP " + num (tp) + (tp > -1.0f ? " !" : ""),
-                    (int) (bx + bw + 12.0f), (int) y, 300, 14, juce::Justification::left);
+        const bool isTp = std::strcmp (rw.name, "PEAK/TP") == 0;
+        g.drawText (fnum (rw.in), (int) colX[1], (int) y, 70, 14, juce::Justification::right);
+        g.setColour (isTp && rw.out > -1.0f ? juce::Colour (0xffe0463c) : pal.fg);
+        g.drawText (fnum (rw.out), (int) colX[2], (int) y, 70, 14, juce::Justification::right);
+        g.setColour (pal.fg);
+        g.drawText (fdiff (rw.in, rw.out), (int) colX[3], (int) y, 70, 14, juce::Justification::right);
+        y += 16.0f;
     }
+    g.setColour (pal.dim);
+    g.setFont (small);
+    g.drawText ("GAIN SORTIE " + juce::String (gainDb >= 0.05 ? "+" : "") + juce::String (gainDb, 1) + " dB", (int) colX[0], (int) y, 150, 12, juce::Justification::left);
+    g.drawText (proc.apvts.getRawParameterValue ("tp8x")->load() > 0.5f ? "TP 8x" : "TP 4x", (int) colX[3], (int) y, 70, 12, juce::Justification::right);
+
+    // ---------------- dynamic-range spreader: loudness -> peak, input over output
+    y += 16.0f;
+    const float bx = colX[0] + 52.0f, bw = 270.0f;
+    auto xOf = [&] (float db) { return bx + bw * juce::jlimit (0.0f, 1.0f, (db + 40.0f) / 40.0f); };
+    g.setColour (pal.ring);
+    g.drawLine (bx, y + 28.0f, bx + bw, y + 28.0f, 1.0f);
+    g.setColour (pal.dim);
+    g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 8.5f, juce::Font::plain)));
+    for (int db = -40; db <= 0; db += 10)
+    {
+        g.drawLine (xOf ((float) db), y + 28.0f, xOf ((float) db), y + 31.0f, 1.0f);
+        g.drawText (juce::String (db), (int) xOf ((float) db) - 12, (int) y + 31, 24, 10, juce::Justification::centred);
+    }
+    auto bar = [&] (float lo, float hi, float yy, const char* name, bool filled)
+    {
+        g.setColour (pal.dim);
+        g.setFont (small);
+        g.drawText (name, (int) colX[0], (int) yy - 2, 50, 12, juce::Justification::left);
+        if (lo <= -99.0f || hi <= -99.0f) return;
+        g.setColour (pal.fg);
+        const float x0 = xOf (lo), x1 = xOf (hi);
+        if (filled) g.fillRect (x0, yy, std::max (x1 - x0, 1.0f), 8.0f); else g.drawRect (x0, yy, std::max (x1 - x0, 1.0f), 8.0f, 1.0f);
+        g.fillRect (x0 - 1.0f, yy - 2.0f, 2.0f, 12.0f);                // loudness
+        g.fillRect (x1 - 1.0f, yy - 2.0f, 2.0f, 12.0f);                // peak
+    };
+    bar (inI, inPk, y + 2.0f, "ENTREE", false);
+    bar (outI, outTp, y + 15.0f, "SORTIE", true);
 }
 
 // ===========================================================================
@@ -589,7 +734,7 @@ void BandStrip::paint (juce::Graphics& g)
 }
 
 // ===========================================================================
-DuneContent::DuneContent (MasteringEQAudioProcessor& p) : proc (p), field (p, palette)
+DuneContent::DuneContent (MasteringEQAudioProcessor& p) : proc (p), field (p, palette), curvesBtn ("COURBES", palette), curvesTopBtn ("DESSUS", palette), tiltBtn ("TILT", palette), bypassBtn ("BYPASS", palette), lookBtn ("ANTICIPATION", palette), tp8Btn ("TP 8X", palette)
 {
     setLookAndFeel (&lnf);
     lnf.setPalette (palette);
@@ -623,6 +768,10 @@ DuneContent::DuneContent (MasteringEQAudioProcessor& p) : proc (p), field (p, pa
     addAndMakeVisible (bypassBtn);
     addAndMakeVisible (curvesBtn);
     addAndMakeVisible (curvesTopBtn);
+    addAndMakeVisible (lookBtn);
+    addAndMakeVisible (tp8Btn);
+    lookAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, "look", lookBtn);
+    tp8Att  = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, "tp8x", tp8Btn);
     curvesAtt    = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, "curves_on", curvesBtn);
     curvesTopAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, "curves_top", curvesTopBtn);
     tiltAtt   = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, "tilt_on", tiltBtn);
@@ -680,8 +829,9 @@ void DuneContent::timerCallback()
     const int mode = (int) std::lround (paramValue (proc.apvts, "mode"));
     for (int i = 0; i < 3; ++i) modeBtn[i].setToggleState (i == mode, juce::dontSendNotification);
     for (auto& s : strips) s->refresh();
-    curvesTopBtn.setButtonText (curvesTopBtn.getToggleState() ? "DESSUS" : "DESSOUS");
+    curvesTopBtn.setLabel (curvesTopBtn.getToggleState() ? "DESSUS" : "DESSOUS");
     curvesTopBtn.setEnabled (curvesBtn.getToggleState());
+    tp8Btn.setLabel (tp8Btn.getToggleState() ? "TP 8X" : "TP 4X");
 
     const double fs = std::max (proc.getSampleRate(), 1.0);
     footerText = juce::String::fromUTF8 ("64-bit  \xC2\xB7  courbes analogiques exactes  \xC2\xB7  latence ")
@@ -698,15 +848,17 @@ void DuneContent::resized()
     modeBtn[2].setBounds (434, y, 86, h);
     qualityBox.setBounds (532, y, 128, h);
     tuningBox.setBounds (668, y, 92, h);
-    tiltBtn.setBounds (776, y, 52, h);
+    tiltBtn.setBounds (770, y, 62, h);
     tiltSlider.setBounds (834, y, 70, h);
     outSlider.setBounds (1022, y, 74, h);
-    bypassBtn.setBounds (1152, y, 76, h);
+    bypassBtn.setBounds (1148, y, 86, h);
 
     field.setBounds (0, 45, (int) kW, 418);
-    curvesBtn.toFront (false); curvesTopBtn.toFront (false);
-    curvesBtn.setBounds (930, 53, 92, 22);
-    curvesTopBtn.setBounds (1028, 53, 92, 22);
+    for (auto* b : { &curvesBtn, &curvesTopBtn, &lookBtn, &tp8Btn }) b->toFront (false);
+    lookBtn.setBounds (26, 45 + 10 + 164, 150, 26);
+    tp8Btn.setBounds (186, 45 + 10 + 164, 110, 26);
+    curvesBtn.setBounds (920, 52, 100, 26);
+    curvesTopBtn.setBounds (1030, 52, 100, 26);
     for (int i = 0; i < eqd::kMaxBands; ++i) strips[(size_t) i]->setBounds (150 * i, 465, 150, 287);
     plusBtn.setBounds (1206, 475, 28, 28);
     minusBtn.setBounds (1206, 515, 28, 28);

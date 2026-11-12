@@ -5,6 +5,7 @@
 #include <array>
 #include <atomic>
 #include "EqDesign.h"
+#include "Loudness.h"
 
 class MasteringEQAudioProcessor : public juce::AudioProcessor,
                                   private juce::AudioProcessorValueTreeState::Listener,
@@ -63,6 +64,8 @@ public:
     };
     Meter meters[2];
     std::atomic<bool> resetTruePeak { false };
+    LoudnessMeter inLoud, outLoud;                       // LUFS momentary / short-term / integrated
+    std::atomic<float> inRmsDb { -120.0f }, inPeakDb { -120.0f };   // input RMS (300 ms) and held sample peak
 
 private:
     void parameterChanged (const juce::String&, float) override;
@@ -90,7 +93,7 @@ private:
     DesignThread designThread { *this };
 
     juce::dsp::Convolution convLL, convLR, convRL, convRR;
-    juce::AudioBuffer<float> bufLL, bufLR, bufRL, bufRR, dryBuf, tpScratch;
+    juce::AudioBuffer<float> bufLL, bufLR, bufRL, bufRR, dryBuf, tpScratch, inBuf;
     juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::None> dryDelay { 140000 };
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> gainSmooth, bypassSmooth;
 
@@ -101,6 +104,8 @@ private:
 
     // metering state
     juce::dsp::Oversampling<float> tpOversampler { 2, 2, juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple, true, false };
+    juce::dsp::Oversampling<float> tpOs8 { 2, 3, juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple, true, false };
+    float inRmsState = 0.0f, inPeakHold = 0.0f;
     float vuState[2] { 0, 0 }, ppmState[2] { 0, 0 }, rmsState[2] { 0, 0 }, tpHold[2] { 0, 0 };
     float vuCoef = 0.0f, ppmAttack = 0.0f, ppmDecay = 1.0f, rmsCoef = 0.0f;
 

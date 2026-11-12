@@ -57,6 +57,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout MasteringEQAudioProcessor::c
                                                        NormalisableRange<float> (-18.0f, 18.0f, 0.1f), 0.0f,
                                                        AudioParameterFloatAttributes().withLabel ("dB")));
     layout.add (std::make_unique<AudioParameterBool> (ParameterID { "bypass", 1 }, "Bypass", false));
+    layout.add (std::make_unique<AudioParameterBool> (ParameterID { "tp8x", 1 }, "True peak oversampling 8x", false));
+    layout.add (std::make_unique<AudioParameterBool> (ParameterID { "look", 1 }, "Meter lookahead", true));
     layout.add (std::make_unique<AudioParameterBool> (ParameterID { "curves_on", 1 }, "Show EQ curves", false));
     layout.add (std::make_unique<AudioParameterBool> (ParameterID { "curves_top", 1 }, "Curves above sand", true));
 
@@ -193,6 +195,7 @@ void MasteringEQAudioProcessor::prepareToPlay (double sampleRate, int samplesPer
     for (auto* b : { &bufLL, &bufLR, &bufRL, &bufRR }) b->setSize (1, maxBlock, false, false, true);
     dryBuf.setSize (2, maxBlock, false, false, true);
     tpScratch.setSize (2, maxBlock, false, false, true);
+    inBuf.setSize (2, maxBlock, false, false, true);
 
     juce::dsp::ProcessSpec dspec { sampleRate, (juce::uint32) maxBlock, 2 };
     dryDelay.prepare (dspec);
@@ -200,6 +203,10 @@ void MasteringEQAudioProcessor::prepareToPlay (double sampleRate, int samplesPer
 
     tpOversampler.initProcessing ((size_t) maxBlock);
     tpOversampler.reset();
+    tpOs8.initProcessing ((size_t) maxBlock);
+    tpOs8.reset();
+    inLoud.prepare (sampleRate); outLoud.prepare (sampleRate);
+    inRmsState = inPeakHold = 0.0f;
     vuCoef = 1.0f - std::exp (-1.0f / (0.065f * (float) sampleRate));
     ppmAttack = 1.0f - std::exp (-1.0f / (0.005f * (float) sampleRate));
     ppmDecay = std::pow (10.0f, -1.0f / (1.7f * (float) sampleRate));
@@ -223,18 +230,47 @@ bool MasteringEQAudioProcessor::isBusesLayoutSupported (const BusesLayout& l) co
 
 void MasteringEQAudioProcessor::updateMeters (const juce::AudioBuffer<float>& buffer, int start, int n, int numCh)
 {
-    if (resetTruePeak.exchange (false)) tpHold[0] = tpHold[1] = 0.0f;
+    if (resetTruePeak.exchange (false))
+    {
+        tpHold[0] = tpHold[1] = 0.0f; inPeakHold = 0.0f;
+        inLoud.requestReset(); outLoud.requestReset();
+    }
+    const bool look = apvts.getRawParameterValue ("look")->load() > 0.5f;
+    const bool os8  = apvts.getRawParameterValue ("tp8x")->load() > 0.5f;
+    const float lookGain = gainSmooth.getTargetValue();
+
+    // loudness (K-weighted) of input and output
+    {
+        const float* ip[2] { inBuf.getReadPointer (0), inBuf.getReadPointer (numCh - 1) };
+        inLoud.process (ip, numCh, n);
+        const float* op[2] { buffer.getReadPointer (0) + start, buffer.getReadPointer (numCh - 1) + start };
+        outLoud.process (op, numCh, n);
+        float r2 = inRmsState, pk = inPeakHold;
+        for (int ch = 0; ch < numCh; ++ch)
+            for (int i = 0; i < n; ++i)
+            {
+                const float v = ip[ch][i];
+                r2 += (v * v - r2) * rmsCoef / (float) numCh;
+                pk = std::max (pk, std::abs (v));
+            }
+        inRmsState = r2; inPeakHold = pk;
+        inRmsDb.store (10.0f * std::log10 (std::max (r2, 1.0e-12f)));
+        inPeakDb.store (juce::Decibels::gainToDecibels (pk, -120.0f));
+    }
 
     for (int ch = 0; ch < numCh; ++ch)
     {
-        const float* x = buffer.getReadPointer (ch) + start;
+        // needles: from the output (what is heard) or, with lookahead, from the input that arrives one latency earlier
+        const float* x = look ? inBuf.getReadPointer (ch) : buffer.getReadPointer (ch) + start;
+        const float sc = look ? lookGain : 1.0f;
+        const float* xo = buffer.getReadPointer (ch) + start;
         float vu = vuState[ch], ppm = ppmState[ch], r2 = rmsState[ch];
         for (int i = 0; i < n; ++i)
         {
-            const float a = std::abs (x[i]);
+            const float a = std::abs (x[i]) * sc;
             vu += (a - vu) * vuCoef;
             if (a > ppm) ppm += (a - ppm) * ppmAttack; else ppm *= ppmDecay;
-            r2 += (a * a - r2) * rmsCoef;
+            r2 += (xo[i] * xo[i] - r2) * rmsCoef;
         }
         vuState[ch] = vu; ppmState[ch] = ppm; rmsState[ch] = r2;
         meters[ch].vu.store (juce::Decibels::gainToDecibels (vu * 1.1107f, -120.0f));
@@ -242,11 +278,12 @@ void MasteringEQAudioProcessor::updateMeters (const juce::AudioBuffer<float>& bu
         meters[ch].rms.store (10.0f * std::log10 (std::max (r2, 1.0e-12f)));
     }
 
-    // true peak: 4x oversampled
+    // true peak of the output: 4x or 8x oversampled
     for (int c = 0; c < 2; ++c)
         tpScratch.copyFrom (c, 0, buffer, std::min (c, numCh - 1), start, n);
     juce::dsp::AudioBlock<const float> in (tpScratch.getArrayOfReadPointers(), 2, (size_t) n);
-    auto up = tpOversampler.processSamplesUp (in);
+    auto& os = os8 ? tpOs8 : tpOversampler;
+    auto up = os.processSamplesUp (in);
     for (int ch = 0; ch < numCh; ++ch)
     {
         float m = tpHold[ch];
@@ -280,6 +317,7 @@ void MasteringEQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, 
             const auto* in = buffer.getReadPointer (ch) + start;
             for (int i = 0; i < n; ++i)
             {
+                inBuf.getWritePointer (ch)[i] = in[i];
                 dryDelay.pushSample (ch, in[i]);
                 d[i] = dryDelay.popSample (ch);
             }

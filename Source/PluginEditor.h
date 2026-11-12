@@ -33,6 +33,19 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+// Nagra-style toggle: lever in a recessed round bezel (up = ON, down = OFF), label beside it
+class NagraSwitch : public juce::Button
+{
+public:
+    NagraSwitch (const juce::String& text, const Palette& p) : juce::Button (text), pal (p) { setClickingTogglesState (true); }
+    void paintButton (juce::Graphics&, bool highlighted, bool down) override;
+    void setLabel (const juce::String& s) { label = s; repaint(); }
+    juce::String label;
+private:
+    const Palette& pal;
+};
+
+// ---------------------------------------------------------------------------
 // Sand-dune field: dotted ridges that follow the EQ curve and the live spectrum, plus the modulometer
 class DuneField : public juce::Component, private juce::Timer
 {
@@ -115,14 +128,14 @@ private:
 
     juce::TextButton modeBtn[3];
     juce::ComboBox qualityBox, tuningBox, themeBox;
-    juce::TextButton curvesBtn { "COURBES" }, curvesTopBtn { "DESSUS" };
-    juce::TextButton tiltBtn { "TILT" }, bypassBtn { "BYPASS" }, plusBtn { "+" }, minusBtn { "-" };
+    NagraSwitch curvesBtn, curvesTopBtn, tiltBtn, bypassBtn, lookBtn, tp8Btn;
+    juce::TextButton plusBtn { "+" }, minusBtn { "-" };
     juce::Slider tiltSlider, outSlider;
     DuneField field;
     std::vector<std::unique_ptr<BandStrip>> strips;
 
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> qualityAtt, tuningAtt, themeAtt;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> tiltAtt, bypassAtt, curvesAtt, curvesTopAtt;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> tiltAtt, bypassAtt, curvesAtt, curvesTopAtt, lookAtt, tp8Att;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> tiltSliderAtt, outAtt;
     juce::String footerText;
     int lastTheme = -1;
