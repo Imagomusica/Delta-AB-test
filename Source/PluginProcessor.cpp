@@ -94,7 +94,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout MasteringEQAudioProcessor::c
         layout.add (std::make_unique<AudioParameterFloat>  (ParameterID { "comp_knee", 1 }, "Comp knee", NormalisableRange<float> (0.0f, 18.0f, 0.1f), 6.0f));
         layout.add (std::make_unique<AudioParameterFloat>  (ParameterID { "comp_mk", 1 },   "Comp makeup", NormalisableRange<float> (-6.0f, 18.0f, 0.1f), 0.0f));
     }
-    layout.add (std::make_unique<AudioParameterBool> (ParameterID { "curves_on", 1 }, "Show EQ curves", false));
+    layout.add (std::make_unique<AudioParameterBool> (ParameterID { "curves_on", 1 }, "Show EQ curves", true));
     layout.add (std::make_unique<AudioParameterBool> (ParameterID { "curves_top", 1 }, "Curves above sand", true));
 
     layout.add (std::make_unique<AudioParameterBool>  (ParameterID { "tilt_on", 1 }, "Tilt On", false));
@@ -519,6 +519,7 @@ void MasteringEQAudioProcessor::runComp (float* L, float* R, int n)
             R[i] = dr + (m2 - s2 - br[i]);
         }
     }
+    compGrDb = -std::min (compState[0], (R && ms != 0) ? compState[1] : 0.0f);
 }
 
 void MasteringEQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
@@ -614,6 +615,7 @@ void MasteringEQAudioProcessor::chain (float* xL, float* xR, int nn, bool cross)
     };
     const bool compOn = apvts.getRawParameterValue ("comp_on")->load() > 0.5f;
     const bool compPost = apvts.getRawParameterValue ("comp_post")->load() > 0.5f;
+    if (! compOn) compGrDb = compGrDb.load() * 0.9f;
     if (compOn && ! compPost) runComp (xL, xR, nn);
 
     std::copy (xL, xL + nn, bufLL.getWritePointer (0));

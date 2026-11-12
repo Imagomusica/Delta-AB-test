@@ -2,6 +2,8 @@
 #include <cstdlib>
 #include "PluginEditor.h"
 
+static double compBandGain (juce::AudioProcessorValueTreeState& a, double f);
+
 namespace
 {
 constexpr float kW = 1240.0f, kH = 790.0f;
@@ -138,24 +140,49 @@ void DuneLnF::drawButtonText (juce::Graphics& g, juce::TextButton& button, bool,
 void DuneLnF::drawRotarySlider (juce::Graphics& g, int x, int y, int w, int h, float pos, float startAngle, float endAngle,
                                 juce::Slider& slider)
 {
-    const float r = (float) juce::jmin (w, h) * 0.5f - 3.0f;
+    // Nagra style: scale ticks on the panel, recessed round bowl, flat tapered lever
+    const float r = (float) juce::jmin (w, h) * 0.5f - 1.0f;
     const float cx = (float) x + (float) w * 0.5f, cy = (float) y + (float) h * 0.5f;
     const float a = startAngle + pos * (endAngle - startAngle);
-
-    juce::Path ring;
-    ring.addCentredArc (cx, cy, r, r, 0.0f, startAngle, endAngle, true);
-    g.setColour (pal.ring);
-    g.strokePath (ring, juce::PathStrokeType (1.4f));
-
     const bool bipolar = (bool) slider.getProperties()["bipolar"];
-    const float from = bipolar ? (startAngle + endAngle) * 0.5f : startAngle;
-    juce::Path val;
-    val.addCentredArc (cx, cy, r, r, 0.0f, std::min (from, a), std::max (from, a), true);
-    g.setColour (pal.fg);
-    g.strokePath (val, juce::PathStrokeType (2.6f));
 
-    g.drawLine (cx + std::sin (a) * r * 0.32f, cy - std::cos (a) * r * 0.32f,
-                cx + std::sin (a) * r * 0.78f, cy - std::cos (a) * r * 0.78f, 2.0f);
+    const int nT = 11;
+    for (int i = 0; i < nT; ++i)
+    {
+        const float t = (float) i / (float) (nT - 1), ang = startAngle + t * (endAngle - startAngle);
+        const bool major = (i == 0 || i == nT - 1 || (bipolar && i == nT / 2) || i == nT / 2);
+        const float r0 = r * (major ? 0.84f : 0.89f);
+        g.setColour (major ? pal.fg : pal.dim);
+        g.drawLine (cx + std::sin (ang) * r0, cy - std::cos (ang) * r0, cx + std::sin (ang) * r, cy - std::cos (ang) * r, major ? 1.6f : 1.0f);
+    }
+
+    const float rb = r * 0.76f;
+    g.setGradientFill (juce::ColourGradient (pal.fg.withAlpha (0.85f), cx - rb, cy - rb, pal.fg.withAlpha (0.18f), cx + rb, cy + rb, false));
+    g.fillEllipse (cx - rb, cy - rb, rb * 2.0f, rb * 2.0f);                       // metal rim
+    const float ri = rb * 0.86f;
+    g.setGradientFill (juce::ColourGradient (pal.bg.withAlpha (1.0f), cx - ri, cy - ri, pal.fg.withAlpha (0.16f), cx + ri, cy + ri, false));
+    g.fillEllipse (cx - ri, cy - ri, ri * 2.0f, ri * 2.0f);                        // recess
+    g.setColour (pal.bg.withAlpha (0.9f));
+    g.drawEllipse (cx - ri, cy - ri, ri * 2.0f, ri * 2.0f, 1.0f);
+
+    // lever: tapered flat bar, wide at the hub, narrow at the tip
+    const float tip = ri * 0.98f, tail = ri * 0.30f, wHub = ri * 0.34f, wTip = ri * 0.12f;
+    juce::Path lever;
+    lever.startNewSubPath (tip, -wTip);
+    lever.lineTo (tip, wTip);
+    lever.lineTo (-tail, wHub);
+    lever.lineTo (-tail, -wHub);
+    lever.closeSubPath();
+    const auto tr = juce::AffineTransform::rotation (a - juce::MathConstants<float>::halfPi).translated (cx, cy);
+    lever.applyTransform (tr);
+    g.setGradientFill (juce::ColourGradient (pal.fg, cx - rb, cy - rb, pal.fg.withAlpha (0.55f), cx + rb, cy + rb, false));
+    g.fillPath (lever);
+    g.setColour (pal.bg.withAlpha (0.7f));
+    g.strokePath (lever, juce::PathStrokeType (0.9f));
+    g.setColour (pal.fg);
+    g.drawLine (cx + std::sin (a) * ri * 0.15f, cy - std::cos (a) * ri * 0.15f, cx + std::sin (a) * ri * 0.92f, cy - std::cos (a) * ri * 0.92f, 0.8f);
+    g.setColour (pal.bg);
+    g.fillEllipse (cx - ri * 0.1f, cy - ri * 0.1f, ri * 0.2f, ri * 0.2f);            // hub screw
 }
 
 void DuneLnF::drawLinearSlider (juce::Graphics& g, int x, int y, int w, int h, float sliderPos, float, float,
@@ -184,7 +211,7 @@ DuneField::DuneField (MasteringEQAudioProcessor& p, const Palette& pl) : proc (p
     add (kLayers + 2, 1500);   // curve S
     spectrum.fill (-120.0f);
     demo = std::getenv ("DUNE_DEMO") != nullptr;
-    meterPanel = { 14.0f, 10.0f, 640.0f, 200.0f };
+    meterPanel = { 690.0f, 266.0f, 546.0f, 148.0f };
     startTimerHz (30);
 }
 
@@ -282,6 +309,9 @@ void DuneField::timerCallback()
         specN[(size_t) i] = juce::jlimit (0.0f, 1.0f, (spectrum[(size_t) bin] + 90.0f) / 70.0f);
     }
 
+    for (int i = 0; i < kPoints; ++i)
+        compMag[(size_t) i] = (float) compBandGain (proc.apvts, 3.0 * std::pow (10000.0, (double) i / (double) (kPoints - 1)));
+
     // phase response of the EQ (analog-equivalent phase, unwrapped); linear mode has none
     if (proc.readMode() == eqd::PhaseMode::Linear)
     {
@@ -307,6 +337,32 @@ void DuneField::timerCallback()
         }
     }
     repaint();
+}
+
+static double compBandGain (juce::AudioProcessorValueTreeState& a, double f)
+{
+    static const int cs[4] { 6, 12, 24, 48 };
+    auto get = [&] (const char* id) { return (double) a.getRawParameterValue (id)->load(); };
+    double g = 1.0;
+    const double lo = get ("comp_lo"), hi = get ("comp_hi");
+    if (lo > 20.5)
+    {
+        eqd::Band b; b.on = true; b.type = eqd::BandType::HighPass; b.freq = lo; b.q = 0.71;
+        b.slopeDbOct = cs[juce::jlimit (0, 3, (int) std::lround (get ("comp_slo")))];
+        g *= std::abs (eqd::bandResponse (b, f));
+    }
+    if (hi < 19999.0)
+    {
+        eqd::Band b; b.on = true; b.type = eqd::BandType::LowPass; b.freq = hi; b.q = 0.71;
+        b.slopeDbOct = cs[juce::jlimit (0, 3, (int) std::lround (get ("comp_shi")))];
+        g *= std::abs (eqd::bandResponse (b, f));
+    }
+    return g;
+}
+
+static void setParamValue (juce::AudioProcessorValueTreeState& a, const char* id, float v)
+{
+    if (auto* p = a.getParameter (id)) { p->beginChangeGesture(); p->setValueNotifyingHost (p->convertTo0to1 (v)); p->endChangeGesture(); }
 }
 
 namespace { const char* kOsNames[] { "4x", "8x", "16x", "24x", "32x", "40x" }; }
@@ -358,7 +414,8 @@ void DuneField::paint (juce::Graphics& g)
     const bool showCurves = proc.apvts.getRawParameterValue ("curves_on")->load() > 0.5f || std::getenv ("DUNE_CURVES") != nullptr;
     const bool curvesTop  = proc.apvts.getRawParameterValue ("curves_top")->load() > 0.5f;
 
-    juce::RectangleList<float> bright, mid, faint, curveM, curveS;
+    juce::RectangleList<float> bright, mid, faint, curveM, curveS, compEdge, compFill;
+    const bool compOn = proc.apvts.getRawParameterValue ("comp_on")->load() > 0.5f;
     const float dot = 1.35f;
     const float specGain = 0.10f + 0.22f * level;          // the dunes move with the music
     const float jitterGain = 1.0f + 1.5f * transient;
@@ -386,7 +443,17 @@ void DuneField::paint (juce::Graphics& g)
             const int c = p.layer - kLayers;
             if (c > 0 && ! anyMS) continue;
             const auto& arr = c == 0 ? dbL : (c == 1 ? dbM : dbS);
-            y = Hm * 0.5f - lookup (arr, p.u) / 18.0f * Hm * 0.42f + p.jy * (c == 0 ? 2.2f : 1.6f);   // grains, not a clean line
+            const float vib = 0.75f + 0.5f * std::sin (t * 4.3f + p.u * 91.0f + p.h * 37.0f);          // the grains tremble a little
+            const float wob = 0.9f * std::sin (t * 2.7f + p.u * 43.0f) * (1.0f + 2.0f * transient);
+            y = Hm * 0.5f - lookup (arr, p.u) / 18.0f * Hm * 0.42f + p.jy * (c == 0 ? 2.2f : 1.6f) * vib + wob;
+            if (c == 0 && compOn)
+            {
+                const float yb = Hm * 0.94f, top = yb - Hm * 0.30f * lookup (compMag, p.u);
+                const float yEdge = top + p.jy * 1.6f * vib + 0.8f * std::sin (t * 3.1f + p.u * 57.0f);
+                if (yEdge > 0.0f && yEdge < Hm) compEdge.addWithoutMerging ({ p.u * W, yEdge, dot * 1.2f, dot * 1.2f });
+                const float yf = yb - (yb - top) * p.h;
+                if (p.h > 0.30f && yb - top > 2.0f) compFill.addWithoutMerging ({ p.u * W, yf + 0.6f * std::sin (t * 2.2f + p.h * 50.0f), dot, dot });
+            }
             if (y < 0.0f || y > Hm) continue;
             juce::Rectangle<float> r (p.u * W, y, dot * 1.15f, dot * 1.15f);
             if (c == 0) bright.addWithoutMerging (r); else if (c == 1) curveM.addWithoutMerging (r); else curveS.addWithoutMerging (r);
@@ -406,6 +473,13 @@ void DuneField::paint (juce::Graphics& g)
     g.setColour (pal.fg.withAlpha (0.60f + 0.25f * level));
     g.fillRectList (mid);
     if (showCurves && curvesTop) drawCurves();
+    if (compOn)
+    {
+        g.setColour (pal.fg.withAlpha (0.38f));
+        g.fillRectList (compFill);
+        g.setColour (pal.fg);
+        g.fillRectList (compEdge);
+    }
 
     // frequency / dB hints
     g.setColour (pal.dim.withAlpha (0.7f));
@@ -418,16 +492,17 @@ void DuneField::paint (juce::Graphics& g)
     }
     if (showCurves)
     {
-        g.drawText ("+18 dB", (int) W - 56, (int) (Hm * 0.08f) - 6, 50, 12, juce::Justification::right);
-        g.drawText ("0 dB", (int) W - 56, (int) (Hm * 0.5f) - 6, 50, 12, juce::Justification::right);
-        g.drawText ("-18 dB", (int) W - 56, (int) (Hm * 0.92f) - 6, 50, 12, juce::Justification::right);
+        g.drawText ("+18 dB", 620, (int) (Hm * 0.08f) - 6, 50, 12, juce::Justification::right);
+        g.drawText ("0 dB", 620, (int) (Hm * 0.5f) - 6, 50, 12, juce::Justification::right);
+        g.drawText ("-18 dB", 620, (int) (Hm * 0.92f) - 6, 50, 12, juce::Justification::right);
     }
 
     // ---- phase strip (oscilloscope style): EQ phase response + stereo goniometer
     g.setColour (pal.ring);
-    g.drawHorizontalLine ((int) Hm, 0.0f, W);
+    const float zoneW = 680.0f;
+    g.drawHorizontalLine ((int) Hm, 0.0f, zoneW);
     const float cy = Hm + stripH * 0.5f, ph = stripH * 0.5f - 14.0f;
-    const float gonioW = 170.0f, plotW = W - gonioW;
+    const float gonioW = 170.0f, plotW = zoneW - gonioW;
     g.setColour (pal.ring.withAlpha (0.6f));
     g.drawHorizontalLine ((int) cy, 0.0f, plotW);
     g.setColour (pal.dim);
@@ -458,9 +533,9 @@ void DuneField::paint (juce::Graphics& g)
     }
 
     // goniometer
-    const float gx = W - gonioW * 0.5f, gy = cy, gs = 46.0f;
+    const float gx = zoneW - gonioW * 0.5f, gy = cy, gs = 46.0f;
     g.setColour (pal.ring);
-    g.drawVerticalLine ((int) (W - gonioW), Hm, H);
+    g.drawVerticalLine ((int) (zoneW - gonioW), Hm, H);
     g.drawRect (gx - gs, gy - gs, gs * 2.0f, gs * 2.0f, 1.0f);
     g.setColour (pal.ring.withAlpha (0.6f));
     g.drawLine (gx - gs, gy, gx + gs, gy, 1.0f);
@@ -480,7 +555,7 @@ void DuneField::paint (juce::Graphics& g)
     g.drawText ("R", (int) (gx + gs), (int) (gy - gs) - 2, 12, 12, juce::Justification::centred);
     g.setColour (pal.fg);
     g.setFont (juce::Font (juce::FontOptions (juce::Font::getDefaultMonospacedFontName(), 10.0f, juce::Font::plain)));
-    g.drawText ("CORR " + juce::String (corr >= 0.0f ? "+" : "") + juce::String (corr, 2), (int) (W - gonioW) + 4, (int) (H - 14), (int) gonioW - 8, 12,
+    g.drawText ("CORR " + juce::String (corr >= 0.0f ? "+" : "") + juce::String (corr, 2), (int) (zoneW - gonioW) + 4, (int) (H - 14), (int) gonioW - 8, 12,
                 juce::Justification::centred);
 
     drawMeters (g);
@@ -489,7 +564,7 @@ void DuneField::paint (juce::Graphics& g)
 void DuneField::drawMeters (juce::Graphics& g)
 {
     const auto P = meterPanel;
-    g.setColour (pal.bg.withAlpha (0.84f));
+    g.setColour (pal.bg.withAlpha (0.90f));
     g.fillRect (P);
     g.setColour (pal.ring);
     g.drawRect (P, 1.0f);
@@ -501,78 +576,91 @@ void DuneField::drawMeters (juce::Graphics& g)
         const float d = b - a; return (d > 0.05f ? juce::String ("+") : juce::String()) + juce::String (d, 1);
     };
 
-    // ---------------- amber modulometer (arc window, two needles)
-    const juce::Point<float> pivot (P.getX() + 135.0f, P.getY() + 182.0f);
-    const float R = 150.0f, r = 106.0f, span = 46.0f;
-    auto ang = [&] (float db) { return juce::degreesToRadians (-span + 2.0f * span * juce::jlimit (0.0f, 1.0f, (db + 40.0f) / 43.0f)); };
-    auto pt = [&] (float radius, float a) { return juce::Point<float> (pivot.x + radius * std::sin (a), pivot.y - radius * std::cos (a)); };
+    // ---------------- round Nagra dial: silver bezel, white face, three arcs (peak / VU / gain reduction), one needle each
+    const juce::Point<float> c (P.getX() + 8.0f + 72.0f, P.getCentreY());
+    const float bezel = 72.0f, face = 66.0f;
+    g.setGradientFill (juce::ColourGradient (pal.fg, c.x - bezel, c.y - bezel, pal.fg.withAlpha (0.25f), c.x + bezel, c.y + bezel, false));
+    g.fillEllipse (c.x - bezel, c.y - bezel, bezel * 2.0f, bezel * 2.0f);
+    g.setColour (pal.bg);
+    g.fillEllipse (c.x - face - 1.5f, c.y - face - 1.5f, (face + 1.5f) * 2.0f, (face + 1.5f) * 2.0f);
+    g.setColour (pal.fg.withAlpha (0.96f));
+    g.fillEllipse (c.x - face, c.y - face, face * 2.0f, face * 2.0f);
 
-    juce::Path win;
-    win.addCentredArc (pivot.x, pivot.y, R, R, 0.0f, juce::degreesToRadians (-span), juce::degreesToRadians (span), true);
-    win.addCentredArc (pivot.x, pivot.y, r, r, 0.0f, juce::degreesToRadians (span), juce::degreesToRadians (-span), false);
-    win.closeSubPath();
+    const juce::Colour ink = pal.bg;
+    const juce::Point<float> pivot (c.x, c.y + 44.0f);
+    const float span = 34.0f;
+    auto ang = [&] (float frac) { return juce::degreesToRadians (-span + 2.0f * span * juce::jlimit (0.0f, 1.0f, frac)); };
+    auto pt = [&] (float radius, float a) { return juce::Point<float> (pivot.x + radius * std::sin (a), pivot.y - radius * std::cos (a)); };
+    auto fmt = [] (float v) { return v > 0.0f ? "+" + juce::String ((int) v) : juce::String ((int) v); };
+
     {
         juce::Graphics::ScopedSaveState ss (g);
-        g.reduceClipRegion (P.toNearestInt());
-        g.setGradientFill (juce::ColourGradient (juce::Colour (0xfff6b94a), pivot.x, pivot.y - R, juce::Colour (0xffd98a1c), pivot.x, pivot.y - r + 20.0f, false));
-        g.fillPath (win);
-        g.setColour (juce::Colour (0xff3a1a08));
-        g.strokePath (win, juce::PathStrokeType (1.0f));
+        juce::Path clip; clip.addEllipse (c.x - face, c.y - face, face * 2.0f, face * 2.0f);
+        g.reduceClipRegion (clip);
+        g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 6.8f, juce::Font::bold)));
 
-        // scale
-        g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 9.0f, juce::Font::plain)));
-        for (float db : { -40.0f, -30.0f, -20.0f, -10.0f, -6.0f, -3.0f, 0.0f, 3.0f })
+        auto arc = [&] (float R, float lo, float hi, std::initializer_list<float> ticks, float minorStep, bool grScale)
         {
-            const float a = ang (db);
-            g.setColour (db >= 0.0f ? juce::Colour (0xffa11a14) : juce::Colour (0xff3a1a08));
-            g.drawLine ({ pt (R - 12.0f, a), pt (R - 2.0f, a) }, db == 0.0f ? 2.0f : 1.2f);
-            const auto tp = pt (R - 22.0f, a);
-            g.drawText (db > 0.0f ? "+" + juce::String ((int) db) : juce::String ((int) db), (int) tp.x - 14, (int) tp.y - 6, 28, 12, juce::Justification::centred);
-        }
-        for (float db = -40.0f; db < 3.0f; db += 2.0f)
-            g.drawLine ({ pt (R - 7.0f, ang (db)), pt (R - 2.0f, ang (db)) }, 0.7f);
-        g.setColour (juce::Colour (0xff3a1a08));
-        g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 10.5f, juce::Font::bold)));
-        g.drawText ("MODULOMETER", (int) pivot.x - 60, (int) (pivot.y - R + 30.0f), 120, 14, juce::Justification::centred);
-        g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 8.5f, juce::Font::plain)));
-        g.drawText ("dBFS", (int) pt (R - 24.0f, ang (3.0f)).x - 12, (int) pt (R - 24.0f, ang (3.0f)).y + 8, 28, 10, juce::Justification::centred);
+            juce::Path p;
+            p.addCentredArc (pivot.x, pivot.y, R, R, 0.0f, juce::degreesToRadians (-span), juce::degreesToRadians (span), true);
+            g.setColour (ink);
+            g.strokePath (p, juce::PathStrokeType (1.1f));
+            for (float v = lo; v <= hi + 0.01f; v += minorStep)
+                g.drawLine ({ pt (R, ang ((v - lo) / (hi - lo))), pt (R - 2.5f, ang ((v - lo) / (hi - lo))) }, 0.7f);
+            for (float v : ticks)
+            {
+                const float a = ang ((v - lo) / (hi - lo));
+                g.setColour (ink);
+                g.drawLine ({ pt (R, a), pt (R - 5.0f, a) }, 1.3f);
+                const auto tp = pt (R + 6.5f, a);
+                g.drawText (grScale ? juce::String ((int) v) : fmt (v), (int) tp.x - 11, (int) tp.y - 5, 22, 10, juce::Justification::centred);
+            }
+        };
+        arc (82.0f, -30.0f, 3.0f, { -30.0f, -20.0f, -10.0f, -6.0f, -3.0f, 0.0f, 3.0f }, 1.0f, false);   // PEAK, dBFS
+        arc (63.0f, -20.0f, 3.0f, { -20.0f, -10.0f, -5.0f, 0.0f, 3.0f }, 1.0f, false);                  // VU (0 VU = -18 dBFS)
+        arc (44.0f, 0.0f, 25.0f, { 0.0f, 5.0f, 10.0f, 15.0f, 20.0f, 25.0f }, 1.0f, true);               // gain reduction, dB
 
-        // needles, clipped to the arc window like on the Nagra
-        g.reduceClipRegion (win);
-        const float ppm = std::max (proc.meters[0].ppm.load(), proc.meters[1].ppm.load());
-        const float vu  = std::max (proc.meters[0].vu.load(),  proc.meters[1].vu.load());
-        g.setColour (juce::Colour (0xff111111));
-        g.drawLine ({ pt (r - 6.0f, ang (vu)), pt (R + 2.0f, ang (vu)) }, 1.6f);
-        g.setColour (juce::Colour (0xffc0201a));
-        g.drawLine ({ pt (r - 6.0f, ang (ppm)), pt (R + 2.0f, ang (ppm)) }, 1.6f);
+        const float peakDb = std::max (proc.meters[0].ppm.load(), proc.meters[1].ppm.load());
+        const float vuDb   = std::max (proc.meters[0].vu.load(),  proc.meters[1].vu.load()) + 18.0f;
+        const float gr     = proc.compGrDb.load();
+        auto needle = [&] (float radius, float frac, float thick)
+        {
+            const float a = ang (frac);
+            g.setColour (ink);
+            g.drawLine ({ pivot, pt (radius, a) }, thick);
+        };
+        needle (86.0f, (peakDb + 30.0f) / 33.0f, 1.9f);        // PEAK, thick
+        needle (67.0f, (vuDb + 20.0f) / 23.0f, 1.0f);          // VU slow, thin
+        needle (48.0f, gr / 25.0f, 1.4f);                      // gain reduction
+
+        g.setColour (ink);
+        g.fillEllipse (pivot.x - 6.0f, pivot.y - 6.0f, 12.0f, 12.0f);                        // hub
+        g.setColour (pal.fg);
+        g.fillEllipse (pivot.x - 2.0f, pivot.y - 2.0f, 4.0f, 4.0f);
+        g.setColour (ink);
+        g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 7.5f, juce::Font::bold)));
+        g.drawText ("MODULOMETER", (int) c.x - 40, (int) c.y + 14, 80, 10, juce::Justification::centred);
+        g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 6.5f, juce::Font::plain)));
+        g.drawText ("PEAK  /  VU  /  GR dB", (int) c.x - 44, (int) c.y + 24, 88, 9, juce::Justification::centred);
     }
-    g.setColour (pal.dim);
-    g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 9.5f, juce::Font::plain)));
-    g.drawText ("OVERSAMPLING TP", (int) P.getX() + 186, (int) P.getY() + 148, 110, 12, juce::Justification::left);
-    g.drawText (juce::String::fromUTF8 ("\xE2\x94\x80 rouge : PEAK    \xE2\x94\x80 noir : VU lent  (clic : reset)"), (int) P.getX() + 8, (int) P.getY() + 128, 270, 12,
-                juce::Justification::left);
 
     // ---------------- readouts: input / output / difference
-    const float tx = P.getX() + 292.0f;
-    const float colX[4] { tx, tx + 80.0f, tx + 160.0f, tx + 240.0f };
-    auto mono = juce::Font (juce::FontOptions (juce::Font::getDefaultMonospacedFontName(), 10.5f, juce::Font::plain));
-    auto small = juce::Font (juce::FontOptions ("Helvetica Neue", 9.5f, juce::Font::bold));
-    float y = P.getY() + 6.0f;
+    const float tx = P.getX() + 160.0f;
+    const float colX[4] { tx, tx + 78.0f, tx + 158.0f, tx + 238.0f };
+    auto mono = juce::Font (juce::FontOptions (juce::Font::getDefaultMonospacedFontName(), 10.0f, juce::Font::plain));
+    auto small = juce::Font (juce::FontOptions ("Helvetica Neue", 9.0f, juce::Font::bold));
+    float y = P.getY() + 3.0f;
     g.setColour (pal.dim);
     g.setFont (small);
-    g.drawText ("MODULOMETRE", (int) tx, (int) y, 150, 12, juce::Justification::left);
-    const double gainDb = proc.apvts.getRawParameterValue ("out")->load();
+    g.drawText ("clic = reset", (int) colX[0], (int) y, 80, 12, juce::Justification::left);
     g.drawText ("ENTREE", (int) colX[1], (int) y, 70, 12, juce::Justification::right);
     g.drawText ("SORTIE", (int) colX[2], (int) y, 70, 12, juce::Justification::right);
     g.drawText ("DIFF", (int) colX[3], (int) y, 70, 12, juce::Justification::right);
 
-    const float outL = std::max (proc.meters[0].rms.load(), proc.meters[1].rms.load());
     const float outRms = 10.0f * std::log10 (0.5f * (std::pow (10.0f, proc.meters[0].rms.load() / 10.0f) + std::pow (10.0f, proc.meters[1].rms.load() / 10.0f)));
-    juce::ignoreUnused (outL);
     const float inPk = proc.inPeakDb.load();
     const float outTp = std::max (proc.meters[0].truePeak.load(), proc.meters[1].truePeak.load());
     const float inI = proc.inLoud.integrated.load(), outI = proc.outLoud.integrated.load();
-
     struct Row { const char* name; float in, out; };
     const Row rows[] {
         { "RMS dBFS", proc.inRmsDb.load(), outRms },
@@ -582,54 +670,55 @@ void DuneField::drawMeters (juce::Graphics& g)
         { "PEAK/TP",  inPk, outTp },
         { "DR (PLR)", (inPk > -99.0f && inI > -99.0f) ? inPk - inI : -120.0f, (outTp > -99.0f && outI > -99.0f) ? outTp - outI : -120.0f },
     };
-    y += 16.0f;
+    y += 14.0f;
     for (const auto& rw : rows)
     {
         g.setColour (pal.dim);
         g.setFont (small);
-        g.drawText (rw.name, (int) colX[0], (int) y, 80, 14, juce::Justification::left);
+        g.drawText (rw.name, (int) colX[0], (int) y, 80, 13, juce::Justification::left);
         g.setColour (pal.fg);
         g.setFont (mono);
         const bool isTp = std::strcmp (rw.name, "PEAK/TP") == 0;
-        g.drawText (fnum (rw.in), (int) colX[1], (int) y, 70, 14, juce::Justification::right);
+        g.drawText (fnum (rw.in), (int) colX[1], (int) y, 70, 13, juce::Justification::right);
         g.setColour (isTp && rw.out > -1.0f ? juce::Colour (0xffe0463c) : pal.fg);
-        g.drawText (fnum (rw.out), (int) colX[2], (int) y, 70, 14, juce::Justification::right);
+        g.drawText (fnum (rw.out), (int) colX[2], (int) y, 70, 13, juce::Justification::right);
         g.setColour (pal.fg);
-        g.drawText (fdiff (rw.in, rw.out), (int) colX[3], (int) y, 70, 14, juce::Justification::right);
-        y += 16.0f;
+        g.drawText (fdiff (rw.in, rw.out), (int) colX[3], (int) y, 70, 13, juce::Justification::right);
+        y += 13.0f;
     }
     g.setColour (pal.dim);
     g.setFont (small);
+    const double gainDb = proc.apvts.getRawParameterValue ("out")->load();
     g.drawText ("GAIN SORTIE " + juce::String (gainDb >= 0.05 ? "+" : "") + juce::String (gainDb, 1) + " dB", (int) colX[0], (int) y, 150, 12, juce::Justification::left);
     g.drawText ("TP " + juce::String (kOsNames[juce::jlimit (0, 5, (int) std::lround (proc.apvts.getRawParameterValue ("os")->load()))]), (int) colX[3], (int) y, 70, 12, juce::Justification::right);
 
     // ---------------- dynamic-range spreader: loudness -> peak, input over output
-    y += 16.0f;
-    const float bx = colX[0] + 52.0f, bw = 270.0f;
+    y += 14.0f;
+    const float bx = colX[0] + 50.0f, bw = 270.0f;
     auto xOf = [&] (float db) { return bx + bw * juce::jlimit (0.0f, 1.0f, (db + 40.0f) / 40.0f); };
     g.setColour (pal.ring);
-    g.drawLine (bx, y + 28.0f, bx + bw, y + 28.0f, 1.0f);
+    g.drawLine (bx, y + 21.0f, bx + bw, y + 21.0f, 1.0f);
     g.setColour (pal.dim);
-    g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 8.5f, juce::Font::plain)));
+    g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 8.0f, juce::Font::plain)));
     for (int db = -40; db <= 0; db += 10)
     {
-        g.drawLine (xOf ((float) db), y + 28.0f, xOf ((float) db), y + 31.0f, 1.0f);
-        g.drawText (juce::String (db), (int) xOf ((float) db) - 12, (int) y + 31, 24, 10, juce::Justification::centred);
+        g.drawLine (xOf ((float) db), y + 21.0f, xOf ((float) db), y + 24.0f, 1.0f);
+        g.drawText (juce::String (db), (int) xOf ((float) db) - 12, (int) y + 23, 24, 9, juce::Justification::centred);
     }
     auto bar = [&] (float lo, float hi, float yy, const char* name, bool filled)
     {
         g.setColour (pal.dim);
         g.setFont (small);
-        g.drawText (name, (int) colX[0], (int) yy - 2, 50, 12, juce::Justification::left);
+        g.drawText (name, (int) colX[0], (int) yy - 2, 50, 11, juce::Justification::left);
         if (lo <= -99.0f || hi <= -99.0f) return;
         g.setColour (pal.fg);
         const float x0 = xOf (lo), x1 = xOf (hi);
-        if (filled) g.fillRect (x0, yy, std::max (x1 - x0, 1.0f), 8.0f); else g.drawRect (x0, yy, std::max (x1 - x0, 1.0f), 8.0f, 1.0f);
-        g.fillRect (x0 - 1.0f, yy - 2.0f, 2.0f, 12.0f);                // loudness
-        g.fillRect (x1 - 1.0f, yy - 2.0f, 2.0f, 12.0f);                // peak
+        if (filled) g.fillRect (x0, yy, std::max (x1 - x0, 1.0f), 6.0f); else g.drawRect (x0, yy, std::max (x1 - x0, 1.0f), 6.0f, 1.0f);
+        g.fillRect (x0 - 1.0f, yy - 2.0f, 2.0f, 10.0f);
+        g.fillRect (x1 - 1.0f, yy - 2.0f, 2.0f, 10.0f);
     };
-    bar (inI, inPk, y + 2.0f, "ENTREE", false);
-    bar (outI, outTp, y + 15.0f, "SORTIE", true);
+    bar (inI, inPk, y + 1.0f, "ENTREE", false);
+    bar (outI, outTp, y + 11.0f, "SORTIE", true);
 }
 
 // ===========================================================================
@@ -744,8 +833,25 @@ void BandStrip::paint (juce::Graphics& g)
 
 // ===========================================================================
 // Split compressor panel
+void PresetGlyph::paintButton (juce::Graphics& g, bool highlighted, bool)
+{
+    const auto b = getLocalBounds().toFloat().reduced (1.0f);
+    g.setColour (pal.bg.withAlpha (0.9f));
+    g.fillRect (b);
+    g.setColour (highlighted ? pal.fg : pal.dim);
+    g.drawRect (b, 1.0f);
+    juce::Path p;
+    const float x0 = b.getX() + 4.0f, x1 = b.getRight() - 4.0f, yt = b.getY() + 4.0f, yb = b.getBottom() - 4.0f, w = x1 - x0;
+    if (kind == 0)      { p.startNewSubPath (x0, yt); p.lineTo (x0 + w * 0.5f, yt); p.lineTo (x0 + w * 0.8f, yb); p.lineTo (x1, yb); }   // low band only
+    else if (kind == 1) { p.startNewSubPath (x0, yb); p.lineTo (x0 + w * 0.25f, yb); p.lineTo (x0 + w * 0.4f, yt); p.lineTo (x0 + w * 0.6f, yt); p.lineTo (x0 + w * 0.75f, yb); p.lineTo (x1, yb); }   // middle
+    else                { p.startNewSubPath (x0, yb); p.lineTo (x0 + w * 0.2f, yb); p.lineTo (x0 + w * 0.5f, yt); p.lineTo (x1, yt); }   // high band only
+    g.setColour (pal.fg);
+    g.strokePath (p, juce::PathStrokeType (1.4f));
+}
+
 CompPanel::CompPanel (MasteringEQAudioProcessor& p, const Palette& pl)
-    : proc (p), pal (pl), onBtn ("SPLIT COMP", pl), postBtn ("POST EQ", pl), minBtn ("LINEAIRE", pl)
+    : proc (p), pal (pl), onBtn ("SPLIT COMP", pl), postBtn ("POST EQ", pl), minBtn ("LINEAIRE", pl),
+      pLow (0, pl), pMid (1, pl), pHigh (2, pl)
 {
     static const char* ids[8] { "comp_lo", "comp_hi", "comp_thr", "comp_ratio", "comp_att", "comp_rel", "comp_knee", "comp_mk" };
     for (int i = 0; i < 8; ++i)
@@ -761,6 +867,11 @@ CompPanel::CompPanel (MasteringEQAudioProcessor& p, const Palette& pl)
     knob[7].getProperties().set ("bipolar", true);
     for (auto* b : { &onBtn, &postBtn, &minBtn }) addAndMakeVisible (b);
     for (auto* c : { &msBox, &sloBox, &shiBox }) addAndMakeVisible (c);
+    for (auto* b : { &pLow, &pMid, &pHigh }) addAndMakeVisible (b);
+    pLow.setTooltip ("Grave seulement");  pMid.setTooltip ("Medium seulement");  pHigh.setTooltip ("Aigu seulement");
+    pLow.onClick  = [this] { setParamValue (proc.apvts, "comp_lo", 20.0f);   setParamValue (proc.apvts, "comp_hi", 250.0f); };
+    pMid.onClick  = [this] { setParamValue (proc.apvts, "comp_lo", 300.0f);  setParamValue (proc.apvts, "comp_hi", 3000.0f); };
+    pHigh.onClick = [this] { setParamValue (proc.apvts, "comp_lo", 3000.0f); setParamValue (proc.apvts, "comp_hi", 20000.0f); };
     fillCombo (proc.apvts, "comp_ms", msBox);
     fillCombo (proc.apvts, "comp_slo", sloBox);
     fillCombo (proc.apvts, "comp_shi", shiBox);
@@ -774,13 +885,16 @@ CompPanel::CompPanel (MasteringEQAudioProcessor& p, const Palette& pl)
 
 void CompPanel::resized()
 {
-    onBtn.setBounds (8, 8, 116, 26);
-    postBtn.setBounds (130, 8, 96, 26);
-    minBtn.setBounds (232, 8, 106, 26);
-    msBox.setBounds (346, 9, 100, 24);
-    for (int i = 0; i < 8; ++i) knob[i].setBounds (8 + 66 * i + 6, 42, 52, 52);
-    sloBox.setBounds (8, 124, 98, 22);
-    shiBox.setBounds (110, 124, 98, 22);
+    onBtn.setBounds (6, 8, 100, 26);
+    postBtn.setBounds (110, 8, 82, 26);
+    minBtn.setBounds (196, 8, 92, 26);
+    msBox.setBounds (292, 9, 78, 24);
+    sloBox.setBounds (374, 9, 82, 24);
+    shiBox.setBounds (460, 9, 82, 24);
+    pLow.setBounds (10, 42, 32, 18);
+    pMid.setBounds (46, 42, 32, 18);
+    pHigh.setBounds (82, 42, 32, 18);
+    for (int i = 0; i < 8; ++i) knob[i].setBounds (8 + 66 * i + 4, 100, 54, 54);
 }
 
 void CompPanel::refresh()
@@ -794,12 +908,46 @@ void CompPanel::refresh()
 
 void CompPanel::paint (juce::Graphics& g)
 {
-    g.setColour (pal.bg.withAlpha (0.86f));
+    g.setColour (pal.bg.withAlpha (0.90f));
     g.fillRect (getLocalBounds());
     g.setColour (pal.ring);
     g.drawRect (getLocalBounds(), 1);
 
-    static const char* names[8] { "COUPE-BAS", "COUPE-HAUT", "SEUIL", "RATIO", "ATTAQUE", "RELACHE", "KNEE", "GAIN" };
+    // the zone that gets compressed, on the same frequency axis as the sand (20 Hz - 20 kHz)
+    const juce::Rectangle<float> gr (8.0f, 40.0f, 530.0f, 54.0f);
+    g.setColour (pal.ring);
+    g.drawRect (gr, 1.0f);
+    for (double f : { 100.0, 1000.0, 10000.0 })
+    {
+        const float x = gr.getX() + gr.getWidth() * (float) (std::log (f / 20.0) / std::log (1000.0));
+        g.setColour (pal.ring.withAlpha (0.6f));
+        g.drawVerticalLine ((int) x, gr.getY() + 1.0f, gr.getBottom() - 1.0f);
+        g.setColour (pal.dim);
+        g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 8.0f, juce::Font::plain)));
+        g.drawText (f >= 1000.0 ? juce::String ((int) (f / 1000.0)) + "k" : juce::String ((int) f), (int) x - 12, (int) gr.getBottom() - 10, 24, 9, juce::Justification::centred);
+    }
+    juce::Path fill, line;
+    const int npts = 265;
+    for (int i = 0; i < npts; ++i)
+    {
+        const double f = 20.0 * std::pow (1000.0, (double) i / (double) (npts - 1));
+        const float gain = (float) compBandGain (proc.apvts, f);
+        const float x = gr.getX() + gr.getWidth() * (float) i / (float) (npts - 1);
+        const float y = gr.getBottom() - 12.0f - (gr.getHeight() - 22.0f) * gain;
+        if (i == 0) { fill.startNewSubPath (x, gr.getBottom() - 12.0f); fill.lineTo (x, y); line.startNewSubPath (x, y); }
+        else        { fill.lineTo (x, y); line.lineTo (x, y); }
+    }
+    fill.lineTo (gr.getRight(), gr.getBottom() - 12.0f);
+    fill.closeSubPath();
+    g.setColour (pal.fg.withAlpha (onBtn.getToggleState() ? 0.30f : 0.12f));
+    g.fillPath (fill);
+    g.setColour (pal.fg);
+    g.strokePath (line, juce::PathStrokeType (1.5f));
+    g.setColour (pal.dim);
+    g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 8.5f, juce::Font::bold)));
+    g.drawText ("ZONE COMPRIMEE", (int) gr.getRight() - 120, (int) gr.getY() + 3, 114, 10, juce::Justification::right);
+
+    static const char* names[8] { "DEPUIS", "JUSQU'A", "SEUIL", "RATIO", "ATTAQUE", "RELACHE", "KNEE", "GAIN" };
     auto v = [this] (const char* id) { return (double) paramValue (proc.apvts, id); };
     auto fq = [] (double f, bool lo) { return (lo && f <= 20.5) || (! lo && f >= 19999.0) ? juce::String ("ouvert") : (f >= 1000.0 ? juce::String (f / 1000.0, 2) + " kHz" : juce::String (f, 0) + " Hz"); };
     juce::String txt[8] {
@@ -812,14 +960,11 @@ void CompPanel::paint (juce::Graphics& g)
         const int x = 8 + 66 * i;
         g.setColour (pal.dim);
         g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 9.0f, juce::Font::bold)));
-        g.drawText (names[i], x, 96, 66, 11, juce::Justification::centred);
+        g.drawText (names[i], x, 155, 66, 11, juce::Justification::centred);
         g.setColour (pal.fg);
         g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 10.5f, juce::Font::plain)));
-        g.drawText (txt[i], x, 108, 66, 13, juce::Justification::centred);
+        g.drawText (txt[i], x, 166, 66, 13, juce::Justification::centred);
     }
-    g.setColour (pal.dim);
-    g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 9.0f, juce::Font::plain)));
-    g.drawText (juce::String::fromUTF8 ("pente bas / haut  \xC2\xB7  meme moteur FIR que l'EQ"), 216, 130, 320, 12, juce::Justification::left);
 }
 
 // ===========================================================================
@@ -859,8 +1004,8 @@ void SrcPanel::paint (juce::Graphics& g)
     g.drawRect (getLocalBounds(), 1);
     g.setColour (pal.dim);
     g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 9.5f, juce::Font::bold)));
-    g.drawText ("OVERSAMPLING CALCUL", 8, 6, 140, 12, juce::Justification::left);
-    g.drawText ("FILTRE UP / DOWN", 86, 6, 120, 12, juce::Justification::left);
+    g.drawText ("OVERSAMPLING", 8, 6, 78, 12, juce::Justification::left);
+    g.drawText ("FILTRE UP / DOWN", 134, 6, 120, 12, juce::Justification::left);
     g.drawText ("PENTE", 86, 56, 112, 11, juce::Justification::left);
     g.drawText ("COUPURE", 272, 20, 100, 11, juce::Justification::left);
     g.drawText ("PRE-RINGING", 444, 20, 100, 11, juce::Justification::left);
@@ -899,8 +1044,10 @@ DuneContent::DuneContent (MasteringEQAudioProcessor& p) : proc (p), field (p, pa
 
     for (auto* s : { &tiltSlider, &outSlider })
     {
-        s->setSliderStyle (juce::Slider::LinearHorizontal);
+        s->setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
         s->setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
+        s->setRotaryParameters (juce::MathConstants<float>::pi * 1.2f, juce::MathConstants<float>::pi * 2.8f, true);
+        s->setMouseDragSensitivity (200);
         addAndMakeVisible (s);
     }
     tiltSliderAtt = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.apvts, "tilt_db", tiltSlider);
@@ -916,8 +1063,10 @@ DuneContent::DuneContent (MasteringEQAudioProcessor& p) : proc (p), field (p, pa
     addAndMakeVisible (lineBtn);
     for (auto* s : { &lineSlider, &linePivot })
     {
-        s->setSliderStyle (juce::Slider::LinearHorizontal);
+        s->setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
         s->setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
+        s->setRotaryParameters (juce::MathConstants<float>::pi * 1.2f, juce::MathConstants<float>::pi * 2.8f, true);
+        s->setMouseDragSensitivity (200);
         addAndMakeVisible (s);
     }
     lineAtt   = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, "tilt_line", lineBtn);
@@ -1004,24 +1153,24 @@ void DuneContent::resized()
     qualityBox.setBounds (532, y, 128, h);
     tuningBox.setBounds (668, y, 92, h);
     tiltBtn.setBounds (770, y, 62, h);
-    tiltSlider.setBounds (834, y, 70, h);
-    outSlider.setBounds (1022, y, 74, h);
+    tiltSlider.setBounds (838, 4, 36, 36);
+    outSlider.setBounds (1058, 4, 36, 36);
     bypassBtn.setBounds (1148, y, 86, h);
 
     field.setBounds (0, 45, (int) kW, 418);
     for (auto* b : { &curvesBtn, &curvesTopBtn, &lookBtn }) b->toFront (false);
     osBox.toFront (false);
-    src.setBounds (690, 45 + 202, 546, 80);
+    src.setBounds (690, 45 + 186, 546, 78);
     src.toFront (false);
     lineBtn.setBounds (386, 761, 112, 24);
-    lineSlider.setBounds (502, 761, 100, 24);
-    linePivot.setBounds (690, 761, 80, 24);
-    comp.setBounds (690, 45 + 44, 546, 152);
+    lineSlider.setBounds (506, 758, 30, 30);
+    linePivot.setBounds (700, 758, 30, 30);
+    comp.setBounds (690, 45 + 6, 546, 180);
     comp.toFront (false);
-    lookBtn.setBounds (26, 45 + 10 + 164, 150, 26);
-    osBox.setBounds (200, 45 + 10 + 166, 78, 22);
-    curvesBtn.setBounds (920, 52, 100, 26);
-    curvesTopBtn.setBounds (1030, 52, 100, 26);
+    lookBtn.setBounds (150, 761, 128, 24);
+    osBox.setBounds (322, 761, 58, 24);
+    curvesBtn.setBounds (14, 52, 100, 26);
+    curvesTopBtn.setBounds (124, 52, 100, 26);
     for (int i = 0; i < eqd::kMaxBands; ++i) strips[(size_t) i]->setBounds (150 * i, 465, 150, 287);
     plusBtn.setBounds (1206, 475, 28, 28);
     minusBtn.setBounds (1206, 515, 28, 28);
@@ -1045,16 +1194,16 @@ void DuneContent::paint (juce::Graphics& g)
     g.setFont (f);
     g.setColour (palette.fg);
     const double tilt = paramValue (proc.apvts, "tilt_db");
-    g.drawText ((tilt > 0.05 ? "+" : "") + juce::String (tilt, 1), 908, 11, 48, 24, juce::Justification::centredLeft);
-    g.drawText ("SORTIE", 950, 11, 66, 24, juce::Justification::centredRight);
-    g.drawText (juce::String (paramValue (proc.apvts, "out"), 1), 1100, 11, 46, 24, juce::Justification::centredLeft);
+    g.drawText ((tilt > 0.05 ? "+" : "") + juce::String (tilt, 1), 878, 11, 48, 24, juce::Justification::centredLeft);
+    g.drawText ("SORTIE", 960, 11, 66, 24, juce::Justification::centredRight);
+    g.drawText (juce::String (paramValue (proc.apvts, "out"), 1), 1098, 11, 46, 24, juce::Justification::centredLeft);
 
     {
         const double sl = paramValue (proc.apvts, "line_db"), pv = paramValue (proc.apvts, "line_freq");
         g.setColour (palette.fg);
         g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 11.5f, juce::Font::plain)));
-        g.drawText ((sl > 0.005 ? "+" : "") + juce::String (sl, 2) + " dB/oct", 606, 761, 82, 24, juce::Justification::centredLeft);
-        g.drawText (pv >= 1000.0 ? juce::String (pv / 1000.0, 2) + " kHz" : juce::String ((int) pv) + " Hz", 774, 761, 80, 24, juce::Justification::centredLeft);
+        g.drawText ((sl > 0.005 ? "+" : "") + juce::String (sl, 2) + " dB/oct", 540, 761, 82, 24, juce::Justification::centredLeft);
+        g.drawText (pv >= 1000.0 ? juce::String (pv / 1000.0, 2) + " kHz" : juce::String ((int) pv) + " Hz", 734, 761, 80, 24, juce::Justification::centredLeft);
     }
     g.setColour (palette.dim);
     g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 11.0f, juce::Font::plain)));

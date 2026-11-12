@@ -68,6 +68,7 @@ public:
     Meter meters[2];
     std::atomic<bool> resetTruePeak { false };
     LoudnessMeter inLoud, outLoud;                       // LUFS momentary / short-term / integrated
+    std::atomic<float> compGrDb { 0.0f };                 // split compressor gain reduction (dB, >= 0)
     std::atomic<float> inRmsDb { -120.0f }, inPeakDb { -120.0f };   // input RMS (300 ms) and held sample peak
 
 private:

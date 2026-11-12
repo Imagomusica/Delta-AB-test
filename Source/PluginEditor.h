@@ -47,6 +47,16 @@ private:
 
 // ---------------------------------------------------------------------------
 // Split compressor panel: one band (low cut + high cut with slopes), pre/post EQ, stereo or mid/side
+class PresetGlyph : public juce::Button
+{
+public:
+    PresetGlyph (int k, const Palette& p) : juce::Button ("preset"), kind (k), pal (p) {}
+    void paintButton (juce::Graphics&, bool highlighted, bool down) override;
+private:
+    int kind;
+    const Palette& pal;
+};
+
 class CompPanel : public juce::Component
 {
 public:
@@ -59,6 +69,7 @@ private:
     MasteringEQAudioProcessor& proc;
     const Palette& pal;
     NagraSwitch onBtn, postBtn, minBtn;
+    PresetGlyph pLow, pMid, pHigh;
     juce::ComboBox msBox, sloBox, shiBox;
     juce::Slider knob[8];
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> knobAtt[8];
@@ -105,7 +116,7 @@ private:
     std::vector<Particle> particles;
     static constexpr int kPoints = 512;
     static constexpr int kLayers = 16;
-    std::array<float, kPoints> dbL {}, dbM {}, dbS {}, specN {}, phaseDeg {};
+    std::array<float, kPoints> dbL {}, dbM {}, dbS {}, specN {}, phaseDeg {}, compMag {};
     float level = 0.0f, transient = 0.0f, corr = 0.0f, gonioPeak = 0.1f;
     bool demo = false;
     std::vector<juce::Point<float>> gonio;
