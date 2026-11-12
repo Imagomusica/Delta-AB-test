@@ -823,7 +823,60 @@ void CompPanel::paint (juce::Graphics& g)
 }
 
 // ===========================================================================
-DuneContent::DuneContent (MasteringEQAudioProcessor& p) : proc (p), field (p, palette), curvesBtn ("COURBES", palette), curvesTopBtn ("DESSUS", palette), tiltBtn ("TILT", palette), bypassBtn ("BYPASS", palette), lookBtn ("ANTICIPATION", palette), lineBtn ("TILT DROIT", palette), comp (p, palette)
+SrcPanel::SrcPanel (MasteringEQAudioProcessor& p, const Palette& pl) : proc (p), pal (pl)
+{
+    addAndMakeVisible (osBox);
+    addAndMakeVisible (steepBox);
+    fillCombo (proc.apvts, "proc_os", osBox);
+    fillCombo (proc.apvts, "src_steep", steepBox);
+    osAtt    = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, "proc_os", osBox);
+    steepAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, "src_steep", steepBox);
+    for (auto* s : { &cutKnob, &preKnob })
+    {
+        s->setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
+        s->setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
+        s->setRotaryParameters (juce::MathConstants<float>::pi * 1.2f, juce::MathConstants<float>::pi * 2.8f, true);
+        s->setMouseDragSensitivity (220);
+        addAndMakeVisible (s);
+    }
+    cutAtt = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.apvts, "src_cut", cutKnob);
+    preAtt = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.apvts, "src_pre", preKnob);
+}
+
+void SrcPanel::resized()
+{
+    osBox.setBounds (8, 30, 70, 24);
+    steepBox.setBounds (86, 30, 112, 24);
+    cutKnob.setBounds (214, 14, 52, 52);
+    preKnob.setBounds (386, 14, 52, 52);
+}
+
+void SrcPanel::paint (juce::Graphics& g)
+{
+    g.setColour (pal.bg.withAlpha (0.86f));
+    g.fillRect (getLocalBounds());
+    g.setColour (pal.ring);
+    g.drawRect (getLocalBounds(), 1);
+    g.setColour (pal.dim);
+    g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 9.5f, juce::Font::bold)));
+    g.drawText ("OVERSAMPLING CALCUL", 8, 6, 140, 12, juce::Justification::left);
+    g.drawText ("FILTRE UP / DOWN", 86, 6, 120, 12, juce::Justification::left);
+    g.drawText ("PENTE", 86, 56, 112, 11, juce::Justification::left);
+    g.drawText ("COUPURE", 272, 20, 100, 11, juce::Justification::left);
+    g.drawText ("PRE-RINGING", 444, 20, 100, 11, juce::Justification::left);
+    const double cut = paramValue (proc.apvts, "src_cut"), pre = paramValue (proc.apvts, "src_pre");
+    g.setColour (pal.fg);
+    g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 12.0f, juce::Font::plain)));
+    g.drawText (juce::String (cut / 1000.0, 2) + " kHz", 272, 34, 100, 15, juce::Justification::left);
+    g.drawText (juce::String ((int) pre) + " %" + (pre >= 99.5 ? "  lineaire" : (pre <= 0.5 ? "  minimale" : "")), 444, 34, 100, 15, juce::Justification::left);
+    g.setColour (pal.dim);
+    g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 9.0f, juce::Font::plain)));
+    g.drawText (juce::String::fromUTF8 ("100 % = phase lin\xC3\xA9" "aire (pr\xC3\xA9-ringing sym\xC3\xA9trique) \xC2\xB7 0 % = phase minimale (aucun pr\xC3\xA9-ringing)"),
+                214, 64, 330, 12, juce::Justification::left);
+}
+
+// ===========================================================================
+DuneContent::DuneContent (MasteringEQAudioProcessor& p) : proc (p), field (p, palette), curvesBtn ("COURBES", palette), curvesTopBtn ("DESSUS", palette), tiltBtn ("TILT", palette), bypassBtn ("BYPASS", palette), lookBtn ("ANTICIPATION", palette), lineBtn ("TILT DROIT", palette), comp (p, palette), src (p, palette)
 {
     setLookAndFeel (&lnf);
     lnf.setPalette (palette);
@@ -859,9 +912,7 @@ DuneContent::DuneContent (MasteringEQAudioProcessor& p) : proc (p), field (p, pa
     addAndMakeVisible (curvesTopBtn);
     addAndMakeVisible (lookBtn);
     addAndMakeVisible (osBox);
-    addAndMakeVisible (procOsBox);
-    fillCombo (proc.apvts, "proc_os", procOsBox);
-    procOsAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, "proc_os", procOsBox);
+    addAndMakeVisible (src);
     addAndMakeVisible (lineBtn);
     for (auto* s : { &lineSlider, &linePivot })
     {
@@ -960,7 +1011,8 @@ void DuneContent::resized()
     field.setBounds (0, 45, (int) kW, 418);
     for (auto* b : { &curvesBtn, &curvesTopBtn, &lookBtn }) b->toFront (false);
     osBox.toFront (false);
-    procOsBox.setBounds (292, 761, 76, 24);
+    src.setBounds (690, 45 + 202, 546, 80);
+    src.toFront (false);
     lineBtn.setBounds (386, 761, 112, 24);
     lineSlider.setBounds (502, 761, 100, 24);
     linePivot.setBounds (690, 761, 80, 24);
@@ -1005,8 +1057,6 @@ void DuneContent::paint (juce::Graphics& g)
         g.drawText (pv >= 1000.0 ? juce::String (pv / 1000.0, 2) + " kHz" : juce::String ((int) pv) + " Hz", 774, 761, 80, 24, juce::Justification::centredLeft);
     }
     g.setColour (palette.dim);
-    g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 10.0f, juce::Font::bold)));
-    g.drawText ("OVERSAMPLING CALCUL", 160, 761, 130, 24, juce::Justification::centredRight);
     g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 11.0f, juce::Font::plain)));
     g.drawText (footerText, 16, 762, 600, 22, juce::Justification::centredLeft);
     g.setColour (palette.fg);

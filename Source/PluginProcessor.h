@@ -6,6 +6,8 @@
 #include <atomic>
 #include "EqDesign.h"
 #include "Loudness.h"
+#include "Resampler.h"
+#include <memory>
 
 class MasteringEQAudioProcessor : public juce::AudioProcessor,
                                   private juce::AudioProcessorValueTreeState::Listener,
@@ -103,7 +105,9 @@ private:
     juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::None> dryDelay { 300000 };
     juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::None> compDelay { 1100000 };
     // whole-chain oversampling (comp + EQ + tilt run at K x the host rate): 1x, 2x, 4x, 8x
-    std::unique_ptr<juce::dsp::Oversampling<float>> procOs[3];
+    std::shared_ptr<SrcEngine> srcEng;                   // built on the design thread, used on the audio thread
+    std::vector<std::shared_ptr<SrcEngine>> srcRetired;
+    std::atomic<int> srcLatency { 0 };
     juce::AudioBuffer<float> workIn, dsBuf;
     std::atomic<int> activeK { 1 };
     int curK = 1;

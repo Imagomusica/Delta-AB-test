@@ -66,6 +66,13 @@ juce::AudioProcessorValueTreeState::ParameterLayout MasteringEQAudioProcessor::c
                                                        AudioParameterFloatAttributes().withLabel ("Hz")));
     layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "proc_os", 1 }, "Processing oversampling",
                                                         StringArray { "1x", "2x", "4x", "8x" }, 0));
+    layout.add (std::make_unique<AudioParameterFloat>  (ParameterID { "src_cut", 1 }, "SRC cutoff", logRange (8000.0f, 40000.0f), 20000.0f,
+                                                        AudioParameterFloatAttributes().withLabel ("Hz")));
+    layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "src_steep", 1 }, "SRC steepness",
+                                                        StringArray { "Doux", "Moyen", "Raide", "Tres raide" }, 2));
+    layout.add (std::make_unique<AudioParameterFloat>  (ParameterID { "src_pre", 1 }, "SRC pre-ringing",
+                                                        NormalisableRange<float> (0.0f, 100.0f, 1.0f), 100.0f,
+                                                        AudioParameterFloatAttributes().withLabel ("%")));
     layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "os", 1 }, "True peak oversampling",
                                                         StringArray { "4x", "8x", "16x", "24x", "32x", "40x" }, 0));
     layout.add (std::make_unique<AudioParameterBool> (ParameterID { "look", 1 }, "Meter lookahead", true));
@@ -190,7 +197,7 @@ void MasteringEQAudioProcessor::parameterChanged (const juce::String& id, float)
         if (id == "comp_lo" || id == "comp_hi" || id == "comp_slo" || id == "comp_shi" || id == "comp_min") designThread.trigger (2);
         return;                                                                       // dynamics are read per block
     }
-    designThread.trigger (id == "quality" || id == "proc_os" ? 7 : 5);
+    designThread.trigger (id == "quality" || id == "proc_os" || id == "src_cut" || id == "src_steep" || id == "src_pre" ? 7 : 5);
 }
 
 void MasteringEQAudioProcessor::updateLatency()
@@ -198,9 +205,7 @@ void MasteringEQAudioProcessor::updateLatency()
     const int K = std::max (1, activeK.load());
     const int work = latencyEq.load() + (apvts.getRawParameterValue ("comp_on")->load() > 0.5f ? latencyComp.load() : 0)
                      + (apvts.getRawParameterValue ("tilt_line")->load() > 0.5f ? latencyLine.load() : 0);
-    int osLat = 0;
-    if (K > 1 && procOs[K == 2 ? 0 : (K == 4 ? 1 : 2)] != nullptr) osLat = (int) std::ceil (procOs[K == 2 ? 0 : (K == 4 ? 1 : 2)]->getLatencyInSamples());
-    latencyTarget = work / K + osLat;
+    latencyTarget = work / K + (K > 1 ? srcLatency.load() : 0);
     triggerAsyncUpdate();
 }
 
@@ -282,7 +287,21 @@ void MasteringEQAudioProcessor::runDesign (int mask)
     }
     crossActive = res.crossActive;
     latencyEq = res.latencySamples;
-    activeK = K;
+    {
+        std::shared_ptr<SrcEngine> eng;
+        if (K > 1)
+        {
+            const double nyq = fs * 0.5;
+            const double cut = std::min ((double) apvts.getRawParameterValue ("src_cut")->load(), nyq * 0.999);
+            eng = std::make_shared<SrcEngine> (K, fs, cut, (int) std::lround (apvts.getRawParameterValue ("src_steep")->load()),
+                                               apvts.getRawParameterValue ("src_pre")->load() / 100.0, maxBlock);
+        }
+        srcLatency = eng ? eng->latency : 0;
+        std::atomic_store (&srcEng, eng);
+        srcRetired.push_back (eng);
+        if (srcRetired.size() > 4) srcRetired.erase (srcRetired.begin());   // old engines are freed here, not on the audio thread
+        activeK = K;
+    }
     updateLatency();
 }
 
@@ -302,12 +321,6 @@ void MasteringEQAudioProcessor::prepareToPlay (double sampleRate, int samplesPer
     for (auto* b : { &bufLL, &bufLR, &bufRL, &bufRR }) b->setSize (1, maxBlock * 8, false, false, true);
     workIn.setSize (2, maxBlock * 8, false, false, true);
     dsBuf.setSize (2, maxBlock, false, false, true);
-    for (int i = 0; i < 3; ++i)
-    {
-        procOs[i] = std::make_unique<juce::dsp::Oversampling<float>> (2, i + 1, juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple, true, false);
-        procOs[i]->initProcessing ((size_t) maxBlock);
-        procOs[i]->reset();
-    }
     dryBuf.setSize (2, maxBlock, false, false, true);
     tpScratch.setSize (2, maxBlock, false, false, true);
     inBuf.setSize (2, maxBlock, false, false, true);
@@ -519,7 +532,8 @@ void MasteringEQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, 
     bypassSmooth.setTargetValue (apvts.getRawParameterValue ("bypass")->load() > 0.5f ? 1.0f : 0.0f);
     dryDelay.setDelay ((float) latencyTarget.load());
     const bool cross = crossActive.load() && numCh == 2;
-    const int K = std::max (1, activeK.load());
+    auto eng = std::atomic_load (&srcEng);
+    const int K = eng ? std::max (1, eng->K) : 1;
     curK = K;
 
     for (int start = 0; start < total; start += maxBlock)
@@ -553,15 +567,14 @@ void MasteringEQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, 
         {
             for (int ch = 0; ch < 2; ++ch)
                 std::copy (buffer.getReadPointer (std::min (ch, numCh - 1)) + start, buffer.getReadPointer (std::min (ch, numCh - 1)) + start + n, workIn.getWritePointer (ch));
-            auto& os = *procOs[K == 2 ? 0 : (K == 4 ? 1 : 2)];
-            juce::dsp::AudioBlock<const float> inBlk (workIn.getArrayOfReadPointers(), 2, (size_t) n);
-            auto up = os.processSamplesUp (inBlk);
+            const float* inp[2] { workIn.getReadPointer (0), workIn.getReadPointer (1) };
+            eng->up (inp, n);
             const int nn = n * K;
-            chain (up.getChannelPointer (0), numCh == 2 ? up.getChannelPointer (1) : nullptr, nn, cross);
-            std::copy (bufLL.getReadPointer (0), bufLL.getReadPointer (0) + nn, up.getChannelPointer (0));
-            if (numCh == 2) std::copy (bufRR.getReadPointer (0), bufRR.getReadPointer (0) + nn, up.getChannelPointer (1));
-            juce::dsp::AudioBlock<float> dsBlk (dsBuf.getArrayOfWritePointers(), 2, (size_t) n);
-            os.processSamplesDown (dsBlk);
+            chain (eng->upChannel (0), numCh == 2 ? eng->upChannel (1) : nullptr, nn, cross);
+            std::copy (bufLL.getReadPointer (0), bufLL.getReadPointer (0) + nn, eng->upChannel (0));
+            if (numCh == 2) std::copy (bufRR.getReadPointer (0), bufRR.getReadPointer (0) + nn, eng->upChannel (1));
+            float* outp[2] { dsBuf.getWritePointer (0), dsBuf.getWritePointer (1) };
+            eng->down (outp, n);
             wetL = dsBuf.getReadPointer (0);
             wetR = dsBuf.getReadPointer (1);
         }

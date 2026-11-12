@@ -67,6 +67,24 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+// Oversampling of the whole chain and the filters used to go up / down (cutoff, steepness, pre-ringing)
+class SrcPanel : public juce::Component
+{
+public:
+    SrcPanel (MasteringEQAudioProcessor&, const Palette&);
+    void paint (juce::Graphics&) override;
+    void resized() override;
+
+private:
+    MasteringEQAudioProcessor& proc;
+    const Palette& pal;
+    juce::ComboBox osBox, steepBox;
+    juce::Slider cutKnob, preKnob;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> osAtt, steepAtt;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> cutAtt, preAtt;
+};
+
+// ---------------------------------------------------------------------------
 // Sand-dune field: dotted ridges that follow the EQ curve and the live spectrum, plus the modulometer
 class DuneField : public juce::Component, private juce::Timer
 {
@@ -150,10 +168,11 @@ private:
     juce::TextButton modeBtn[3];
     juce::ComboBox qualityBox, tuningBox, themeBox;
     NagraSwitch curvesBtn, curvesTopBtn, tiltBtn, bypassBtn, lookBtn;
-    juce::ComboBox osBox, procOsBox;
+    juce::ComboBox osBox;
     NagraSwitch lineBtn;
     juce::Slider lineSlider, linePivot;
     CompPanel comp;
+    SrcPanel src;
     juce::TextButton plusBtn { "+" }, minusBtn { "-" };
     juce::Slider tiltSlider, outSlider;
     DuneField field;
@@ -161,7 +180,7 @@ private:
 
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> qualityAtt, tuningAtt, themeAtt;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> tiltAtt, bypassAtt, curvesAtt, curvesTopAtt, lookAtt;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> osAtt, procOsAtt;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> osAtt;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> lineAtt;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> lineSAtt, linePAtt;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> tiltSliderAtt, outAtt;
