@@ -1,0 +1,32 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: "Configure (universal binary Apple Silicon + Intel)"
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+
+      - name: Build
+        run: cmake --build build --config Release -j4
+
+      - name: Stage plugins
+        run: |
+          mkdir -p dist/VST3 dist/Components
+          cp -R "build/Dune_artefacts/Release/VST3/Dune.vst3" dist/VST3/
+          cp -R "build/Dune_artefacts/Release/AU/Dune.component" dist/Components/
+          codesign --force --deep -s - "dist/VST3/Dune.vst3"
+          codesign --force --deep -s - "dist/Components/Dune.component"
+          ls -R dist | head -40
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Dune-macOS
+          path: dist
