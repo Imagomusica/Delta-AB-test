@@ -1,40 +1,62 @@
 #pragma once
 #include "PluginProcessor.h"
 #include <memory>
+#include <vector>
 
-// Frequency-response display with draggable band nodes and a spectrum analyzer.
-class EqDisplay : public juce::Component, private juce::Timer
+// ---------------------------------------------------------------------------
+// Themes: White 9016, Anthracite 7016, Black 9005
+struct Palette
+{
+    juce::Colour bg, fg, dim, ring;
+};
+Palette paletteFor (int theme);
+
+class DuneLnF : public juce::LookAndFeel_V4
 {
 public:
-    explicit EqDisplay (MasteringEQAudioProcessor&);
-    ~EqDisplay() override { stopTimer(); }
+    void setPalette (const Palette& p);
+    juce::Font font (float size, int style = juce::Font::plain) const;
 
-    void paint (juce::Graphics&) override;
-    void resized() override { plot = getLocalBounds().toFloat().reduced (40.0f, 20.0f); }
-    void mouseDown (const juce::MouseEvent&) override;
-    void mouseDrag (const juce::MouseEvent&) override;
-    void mouseUp (const juce::MouseEvent&) override;
-    void mouseDoubleClick (const juce::MouseEvent&) override;
-    void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
-
-    std::function<void (int)> onSelect;
-    void setSelected (int i) { selected = i; repaint(); }
-    int getSelected() const { return selected; }
+    juce::Font getComboBoxFont (juce::ComboBox&) override;
+    juce::Font getPopupMenuFont() override;
+    juce::Font getTextButtonFont (juce::TextButton&, int) override;
+    void drawComboBox (juce::Graphics&, int w, int h, bool down, int bx, int by, int bw, int bh, juce::ComboBox&) override;
+    void positionComboBoxText (juce::ComboBox&, juce::Label&) override;
+    void drawButtonBackground (juce::Graphics&, juce::Button&, const juce::Colour&, bool highlighted, bool down) override;
+    void drawButtonText (juce::Graphics&, juce::TextButton&, bool highlighted, bool down) override;
+    void drawRotarySlider (juce::Graphics&, int x, int y, int w, int h, float pos, float startAngle, float endAngle, juce::Slider&) override;
+    void drawLinearSlider (juce::Graphics&, int x, int y, int w, int h, float sliderPos, float minPos, float maxPos,
+                           juce::Slider::SliderStyle, juce::Slider&) override;
 
 private:
+    Palette pal = paletteFor (2);
+};
+
+// ---------------------------------------------------------------------------
+// Sand-dune field: dotted ridges that follow the EQ curve and the live spectrum, plus the modulometer
+class DuneField : public juce::Component, private juce::Timer
+{
+public:
+    DuneField (MasteringEQAudioProcessor&, const Palette&);
+    ~DuneField() override { stopTimer(); }
+    void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override;
+
+private:
+    struct Particle { float u, jy, h; int layer; };
     void timerCallback() override;
-    float freqToX (double f) const;
-    double xToFreq (float x) const;
-    float dbToY (double db) const;
-    double yToDb (float y) const;
-    int hitTest (juce::Point<float>) const;
-    void setParam (int band, const char* name, float value);
     void updateAnalyzer();
+    void drawMeters (juce::Graphics&);
 
     MasteringEQAudioProcessor& proc;
-    juce::Rectangle<float> plot;
-    int selected = 0;
-    int dragging = -1;
+    const Palette& pal;
+    std::vector<Particle> particles;
+    static constexpr int kPoints = 512;
+    static constexpr int kLayers = 16;
+    std::array<float, kPoints> dbL {}, dbM {}, dbS {}, specN {};
+    bool anyMS = false;
+    float t = 0.0f;
+    juce::Rectangle<float> meterPanel;
 
     static constexpr int fftOrder = 13;
     static constexpr int fftSize = 1 << fftOrder;
@@ -44,44 +66,71 @@ private:
     std::array<float, fftSize / 2> spectrum {};
 };
 
-class MasteringEQAudioProcessorEditor : public juce::AudioProcessorEditor, private juce::Timer
+// ---------------------------------------------------------------------------
+class BandStrip : public juce::Component
 {
 public:
-    explicit MasteringEQAudioProcessorEditor (MasteringEQAudioProcessor&);
-    ~MasteringEQAudioProcessorEditor() override { stopTimer(); }
+    BandStrip (MasteringEQAudioProcessor&, int index, const Palette&);
+    void paint (juce::Graphics&) override;
+    void resized() override;
+    void refresh();
 
+private:
+    void setChannel (int idx);
+
+    MasteringEQAudioProcessor& proc;
+    const int band;
+    const Palette& pal;
+    bool bandOn = true;
+    bool isPass = false, hasGain = true;
+
+    juce::TextButton numBtn, stBtn, mBtn, sBtn;
+    juce::ComboBox typeBox, slopeBox;
+    juce::Slider freqKnob, gainKnob, qKnob;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> onAtt;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> typeAtt, slopeAtt;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> freqAtt, gainAtt, qAtt;
+};
+
+// ---------------------------------------------------------------------------
+class DuneContent : public juce::Component, private juce::Timer
+{
+public:
+    explicit DuneContent (MasteringEQAudioProcessor&);
+    ~DuneContent() override;
     void paint (juce::Graphics&) override;
     void resized() override;
 
 private:
     void timerCallback() override;
-    void selectBand (int i);
-    void updateControlVisibility();
-    void updateBandButtons();
+    void applyTheme();
+    void setParamIndex (const char* id, int idx);
 
     MasteringEQAudioProcessor& proc;
-    EqDisplay display;
+    DuneLnF lnf;
+    Palette palette = paletteFor (2);
 
-    // global controls
-    juce::ComboBox modeBox, qualityBox;
-    juce::Slider outSlider;
-    juce::ToggleButton bypassButton { "Bypass" };
-    juce::Label latencyLabel, titleLabel;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> modeAtt, qualityAtt;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> outAtt;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> bypassAtt;
+    juce::TextButton modeBtn[3];
+    juce::ComboBox qualityBox, tuningBox, themeBox;
+    juce::TextButton tiltBtn { "TILT" }, bypassBtn { "BYPASS" }, plusBtn { "+" }, minusBtn { "-" };
+    juce::Slider tiltSlider, outSlider;
+    DuneField field;
+    std::vector<std::unique_ptr<BandStrip>> strips;
 
-    // band selector + per-band controls
-    std::array<juce::TextButton, eqd::kMaxBands> bandButtons;
-    juce::ToggleButton onButton { "On" };
-    juce::ComboBox typeBox, chanBox, slopeBox;
-    juce::Slider freqSlider, gainSlider, qSlider;
-    juce::Label freqLabel, gainLabel, qLabel;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> onAtt;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> typeAtt, chanAtt, slopeAtt;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> freqAtt, gainAtt, qAtt;
-    int currentBand = 0;
-    int lastLatency = -1;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> qualityAtt, tuningAtt, themeAtt;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> tiltAtt, bypassAtt;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> tiltSliderAtt, outAtt;
+    juce::String footerText;
+    int lastTheme = -1;
+};
 
+class MasteringEQAudioProcessorEditor : public juce::AudioProcessorEditor
+{
+public:
+    explicit MasteringEQAudioProcessorEditor (MasteringEQAudioProcessor&);
+    void resized() override;
+
+private:
+    DuneContent content;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MasteringEQAudioProcessorEditor)
 };

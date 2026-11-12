@@ -3,11 +3,12 @@
 
 namespace
 {
-const char* kBandTypes[]  = { "Bell", "Low shelf", "High shelf", "High-pass", "Low-pass", "Notch" };
-const char* kChannels[]   = { "Stereo", "Left", "Right", "Mid", "Side" };
+const char* kBandTypes[]  = { "Cloche", "Shelf grave", "Shelf aigu", "Coupe-bas", "Coupe-haut", "Notch" };
+const char* kChannels[]   = { "ST", "L", "R", "M", "S" };
 const int   kSlopes[]     = { 6, 12, 18, 24, 36, 48, 72, 96 };
-const double kDefFreq[]   = { 30, 100, 300, 1000, 3000, 8000, 12000, 18000 };
+const double kDefFreq[]   = { 20, 100, 200, 800, 2500, 6000, 10000, 30000 };
 const int    kDefType[]   = { 3, 1, 0, 0, 0, 0, 2, 4 };
+const double kTuning[]    = { 415, 432, 435, 438, 440, 442, 443, 444 };
 
 juce::NormalisableRange<float> logRange (float lo, float hi)
 {
@@ -35,7 +36,7 @@ MasteringEQAudioProcessor::~MasteringEQAudioProcessor()
     cancelPendingUpdate();
     designThread.signalThreadShouldExit();
     designThread.notify();
-    designThread.stopThread (3000);
+    designThread.stopThread (5000);
 }
 
 juce::AudioProcessorValueTreeState::ParameterLayout MasteringEQAudioProcessor::createLayout()
@@ -43,14 +44,27 @@ juce::AudioProcessorValueTreeState::ParameterLayout MasteringEQAudioProcessor::c
     using namespace juce;
     AudioProcessorValueTreeState::ParameterLayout layout;
 
-    layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "mode", 1 }, "Phase mode",
-                                                        StringArray { "Natural (min. phase)", "Linear phase" }, 0));
-    layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "quality", 1 }, "Resolution",
-                                                        StringArray { "Standard", "High", "Very high", "Maximum" }, 1));
+    layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "mode", 2 }, "Phase mode",
+                                                        StringArray { "Lineaire", "Naturelle", "Minimale" }, 0));
+    layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "quality", 2 }, "Resolution",
+                                                        StringArray { "Court 0.35 s", "Moyen 0.7 s", "Standard 1.4 s", "Long 2.8 s" }, 2));
+    StringArray tunings;
+    for (auto t : kTuning) tunings.add ("La " + String ((int) t));
+    layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "tuning", 1 }, "Reference pitch", tunings, 5));
+    layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "theme", 1 }, "Theme",
+                                                        StringArray { "White 9016", "Anthracite 7016", "Black 9005" }, 2));
     layout.add (std::make_unique<AudioParameterFloat> (ParameterID { "out", 1 }, "Output gain",
-                                                       NormalisableRange<float> (-18.0f, 18.0f, 0.01f), 0.0f,
+                                                       NormalisableRange<float> (-18.0f, 18.0f, 0.1f), 0.0f,
                                                        AudioParameterFloatAttributes().withLabel ("dB")));
     layout.add (std::make_unique<AudioParameterBool> (ParameterID { "bypass", 1 }, "Bypass", false));
+
+    layout.add (std::make_unique<AudioParameterBool>  (ParameterID { "tilt_on", 1 }, "Tilt On", false));
+    layout.add (std::make_unique<AudioParameterFloat> (ParameterID { "tilt_db", 1 }, "Tilt",
+                                                       NormalisableRange<float> (-6.0f, 6.0f, 0.1f), 0.0f,
+                                                       AudioParameterFloatAttributes().withLabel ("dB")));
+    layout.add (std::make_unique<AudioParameterFloat> (ParameterID { "tilt_freq", 1 }, "Tilt pivot",
+                                                       logRange (100.0f, 5000.0f), 650.0f,
+                                                       AudioParameterFloatAttributes().withLabel ("Hz")));
 
     StringArray types, chans, slopes;
     for (auto* t : kBandTypes) types.add (t);
@@ -60,7 +74,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout MasteringEQAudioProcessor::c
     for (int i = 0; i < eqd::kMaxBands; ++i)
     {
         const String n = "Band " + String (i + 1) + " ";
-        layout.add (std::make_unique<AudioParameterBool>   (ParameterID { pid (i, "on"), 1 },    n + "On", false));
+        layout.add (std::make_unique<AudioParameterBool>   (ParameterID { pid (i, "on"), 1 },    n + "On", i < 7));
         layout.add (std::make_unique<AudioParameterChoice> (ParameterID { pid (i, "type"), 1 },  n + "Type", types, kDefType[i]));
         layout.add (std::make_unique<AudioParameterFloat>  (ParameterID { pid (i, "freq"), 1 },  n + "Frequency",
                                                             logRange (10.0f, 30000.0f), (float) kDefFreq[i],
@@ -71,10 +85,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout MasteringEQAudioProcessor::c
                                                                     { const auto s = t.trim(); float v = s.getFloatValue();
                                                                       return s.containsIgnoreCase ("k") ? v * 1000.0f : v; })));
         layout.add (std::make_unique<AudioParameterFloat>  (ParameterID { pid (i, "gain"), 1 },  n + "Gain",
-                                                            NormalisableRange<float> (-24.0f, 24.0f, 0.01f), 0.0f,
+                                                            NormalisableRange<float> (-24.0f, 24.0f, 0.1f), 0.0f,
                                                             AudioParameterFloatAttributes().withLabel ("dB")));
         layout.add (std::make_unique<AudioParameterFloat>  (ParameterID { pid (i, "q"), 1 },     n + "Q",
-                                                            logRange (0.1f, 20.0f), 1.0f));
+                                                            logRange (0.1f, 20.0f), 0.71f));
         layout.add (std::make_unique<AudioParameterChoice> (ParameterID { pid (i, "ch"), 1 },    n + "Channel", chans, 0));
         layout.add (std::make_unique<AudioParameterChoice> (ParameterID { pid (i, "slope"), 1 }, n + "Slope", slopes, 1));
     }
@@ -100,14 +114,28 @@ eqd::Band MasteringEQAudioProcessor::readBand (int i) const
     return b;
 }
 
+eqd::Tilt MasteringEQAudioProcessor::readTilt() const
+{
+    eqd::Tilt t;
+    t.on = apvts.getRawParameterValue ("tilt_on")->load() > 0.5f;
+    t.db = apvts.getRawParameterValue ("tilt_db")->load();
+    t.pivot = apvts.getRawParameterValue ("tilt_freq")->load();
+    return t;
+}
+
 eqd::PhaseMode MasteringEQAudioProcessor::readMode() const
 {
-    return apvts.getRawParameterValue ("mode")->load() > 0.5f ? eqd::PhaseMode::Linear : eqd::PhaseMode::Natural;
+    return (eqd::PhaseMode) juce::jlimit (0, 2, (int) std::lround (apvts.getRawParameterValue ("mode")->load()));
+}
+
+double MasteringEQAudioProcessor::readTuning() const
+{
+    return kTuning[juce::jlimit (0, 7, (int) std::lround (apvts.getRawParameterValue ("tuning")->load()))];
 }
 
 void MasteringEQAudioProcessor::parameterChanged (const juce::String& id, float)
 {
-    if (id == "out" || id == "bypass") return;   // handled in the audio thread
+    if (id == "out" || id == "bypass" || id == "tuning" || id == "theme") return;   // no new filter needed
     designThread.trigger();
 }
 
@@ -119,7 +147,7 @@ void MasteringEQAudioProcessor::runDesign()
     eqd::Band bands[eqd::kMaxBands];
     for (int i = 0; i < eqd::kMaxBands; ++i) bands[i] = readBand (i);
     const int quality = (int) std::lround (apvts.getRawParameterValue ("quality")->load());
-    const auto res = eqd::design (bands, eqd::kMaxBands, fs, quality, readMode());
+    const auto res = eqd::design (bands, eqd::kMaxBands, readTilt(), fs, quality, readMode());
 
     auto load = [&] (juce::dsp::Convolution& c, const std::vector<float>& v)
     {
@@ -162,10 +190,19 @@ void MasteringEQAudioProcessor::prepareToPlay (double sampleRate, int samplesPer
 
     for (auto* b : { &bufLL, &bufLR, &bufRL, &bufRR }) b->setSize (1, maxBlock, false, false, true);
     dryBuf.setSize (2, maxBlock, false, false, true);
+    tpScratch.setSize (2, maxBlock, false, false, true);
 
     juce::dsp::ProcessSpec dspec { sampleRate, (juce::uint32) maxBlock, 2 };
     dryDelay.prepare (dspec);
     dryDelay.reset();
+
+    tpOversampler.initProcessing ((size_t) maxBlock);
+    tpOversampler.reset();
+    vuCoef = 1.0f - std::exp (-1.0f / (0.065f * (float) sampleRate));
+    ppmAttack = 1.0f - std::exp (-1.0f / (0.005f * (float) sampleRate));
+    ppmDecay = std::pow (10.0f, -1.0f / (1.7f * (float) sampleRate));
+    rmsCoef = 1.0f - std::exp (-1.0f / (0.3f * (float) sampleRate));
+    for (int c = 0; c < 2; ++c) { vuState[c] = ppmState[c] = rmsState[c] = tpHold[c] = 0.0f; }
 
     gainSmooth.reset (sampleRate, 0.03);
     bypassSmooth.reset (sampleRate, 0.03);
@@ -180,6 +217,42 @@ bool MasteringEQAudioProcessor::isBusesLayoutSupported (const BusesLayout& l) co
     const auto out = l.getMainOutputChannelSet();
     return (out == juce::AudioChannelSet::mono() || out == juce::AudioChannelSet::stereo())
            && out == l.getMainInputChannelSet();
+}
+
+void MasteringEQAudioProcessor::updateMeters (const juce::AudioBuffer<float>& buffer, int start, int n, int numCh)
+{
+    if (resetTruePeak.exchange (false)) tpHold[0] = tpHold[1] = 0.0f;
+
+    for (int ch = 0; ch < numCh; ++ch)
+    {
+        const float* x = buffer.getReadPointer (ch) + start;
+        float vu = vuState[ch], ppm = ppmState[ch], r2 = rmsState[ch];
+        for (int i = 0; i < n; ++i)
+        {
+            const float a = std::abs (x[i]);
+            vu += (a - vu) * vuCoef;
+            if (a > ppm) ppm += (a - ppm) * ppmAttack; else ppm *= ppmDecay;
+            r2 += (a * a - r2) * rmsCoef;
+        }
+        vuState[ch] = vu; ppmState[ch] = ppm; rmsState[ch] = r2;
+        meters[ch].vu.store (juce::Decibels::gainToDecibels (vu * 1.1107f, -120.0f));
+        meters[ch].ppm.store (juce::Decibels::gainToDecibels (ppm, -120.0f));
+        meters[ch].rms.store (10.0f * std::log10 (std::max (r2, 1.0e-12f)));
+    }
+
+    // true peak: 4x oversampled
+    for (int c = 0; c < 2; ++c)
+        tpScratch.copyFrom (c, 0, buffer, std::min (c, numCh - 1), start, n);
+    juce::dsp::AudioBlock<const float> in (tpScratch.getArrayOfReadPointers(), 2, (size_t) n);
+    auto up = tpOversampler.processSamplesUp (in);
+    for (int ch = 0; ch < numCh; ++ch)
+    {
+        float m = tpHold[ch];
+        const float* u = up.getChannelPointer ((size_t) ch);
+        for (size_t i = 0; i < up.getNumSamples(); ++i) m = std::max (m, std::abs (u[i]));
+        tpHold[ch] = m;
+        meters[ch].truePeak.store (juce::Decibels::gainToDecibels (m, -120.0f));
+    }
 }
 
 void MasteringEQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
@@ -251,6 +324,8 @@ void MasteringEQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, 
             anaBuf[(size_t) pos] = mono / (float) numCh;
             anaPos.store ((pos + 1) % anaSize, std::memory_order_release);
         }
+
+        updateMeters (buffer, start, n, numCh);
     }
 }
 

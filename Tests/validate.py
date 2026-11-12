@@ -29,7 +29,7 @@ def band(t, f0, g, q, slope=12):
 
 SC = {
     "A_bell1k": dict(L=[band("bell", 1000, 6, 1)], R=[band("bell", 1000, 6, 1)], M=[], S=[]),
-    "B_shelves": None, "C_bell30": None, "D_ms": None, "E_hp30_24": None, "F_close": None,
+    "B_shelves": None, "C_bell30": None, "D_ms": None, "E_hp30_24": None, "F_close": None, "G_tilt": None,
 }
 bell = lambda f, g, q: band("bell", f, g, q)
 both = lambda lst: dict(L=lst, R=lst, M=[], S=[])
@@ -39,6 +39,9 @@ SC["C_bell30"] = both([bell(30, 6, 1)])
 SC["D_ms"] = dict(L=[], R=[], M=[bell(1000, 6, 1)], S=[bell(3000, -6, 1)])
 SC["E_hp30_24"] = both([band("hp", 30, 0, 1, 24)])
 SC["F_close"] = both([bell(1000, 6, 1), bell(1500, 6, 1)])
+def tilt3(f):
+    return 10 ** (3.0 * np.tanh(np.log2(np.maximum(f, 1.0) / 650.0) / 2.2) / 20)
+SC["G_tilt"] = both([bell(2000, -3, 2), lambda f: tilt3(f) + 0j])
 
 
 def mag(lst, f):
@@ -61,8 +64,9 @@ f = np.fft.rfftfreq(NFFT, 1 / FS)
 rows = []
 for p in sorted(glob.glob(os.path.join(D, "*.bin"))):
     name = os.path.basename(p)[:-4]
-    sc = name.split("_nat")[0].split("_lin")[0]
-    nat = "_nat" in name
+    sc = name.split("_nat")[0].split("_lin")[0].split("_min")[0]
+    nat = "_lin" not in name
+    natural = "_nat" in name
     L, lat, cross, ir = load(p)
     spec = [np.fft.rfft(x, NFFT) for x in ir]
     ref = SC[sc]
@@ -95,8 +99,18 @@ for p in sorted(glob.glob(os.path.join(D, "*.bin"))):
     # linear-phase symmetry
     sym = float(np.max(np.abs(ir[0][1:L] - ir[0][1:L][::-1]))) if not nat and not cross else float("nan")
     # gain at 1 kHz vs low freq limits etc. already in err
-    rows.append((name, L, lat, err, pre, edge, sym))
+    phs = float("nan")
+    if natural and not cross and sc in ("A_bell1k", "F_close", "B_shelves"):
+        ff = f[(f > 30) & (f < 0.4 * FS / 2)]
+        idx = np.searchsorted(f, ff)
+        an = np.ones_like(ff, dtype=complex)
+        for h in SC[sc]["L"]:
+            an = an * h(ff)
+        got = spec[0][idx]
+        d = np.angle(got / an)
+        phs = float(np.degrees(np.max(np.abs(d))))
+    rows.append((name, L, lat, err, pre, edge, phs))
 
-print(f"{'case':22s} {'L':>6s} {'lat':>6s} {'maxErr dB':>10s} {'preEnergy dB':>13s} {'tail dB':>8s}")
-for n, L, lat, err, pre, edge, sym in rows:
-    print(f"{n:22s} {L:6d} {lat:6d} {err:10.4f} {pre:13.1f} {edge:8.1f}")
+print(f"{'case':22s} {'L':>7s} {'lat':>7s} {'maxErr dB':>10s} {'preEnergy dB':>13s} {'tail dB':>8s} {'phase err deg (nat)':>20s}")
+for n, L, lat, err, pre, edge, phs in rows:
+    print(f"{n:22s} {L:7d} {lat:7d} {err:10.4f} {pre:13.1f} {edge:8.1f} {phs:20.3f}")

@@ -21,21 +21,25 @@ int main (int argc, char** argv)
 {
     const std::string out = argc > 1 ? argv[1] : ".";
     const double fs = argc > 2 ? std::atof (argv[2]) : 96000.0;
-    struct Sc { const char* id; std::vector<Band> bands; };
+    struct Sc { const char* id; std::vector<Band> bands; Tilt tilt; };
+    Tilt none; Tilt t3; t3.on = true; t3.db = 3.0;
     std::vector<Sc> sc = {
-        { "A_bell1k",   { B (BandType::Bell, 1000, 6, 1) } },
-        { "B_shelves",  { B (BandType::LowShelf, 100, 6, 0.71), B (BandType::HighShelf, 10000, 6, 0.71), B (BandType::Bell, 18000, 6, 1) } },
-        { "C_bell30",   { B (BandType::Bell, 30, 6, 1) } },
-        { "D_ms",       { B (BandType::Bell, 1000, 6, 1, Channel::Mid), B (BandType::Bell, 3000, -6, 1, Channel::Side) } },
-        { "E_hp30_24",  { B (BandType::HighPass, 30, 0, 1, Channel::Stereo, 24) } },
-        { "F_close",    { B (BandType::Bell, 1000, 6, 1), B (BandType::Bell, 1500, 6, 1) } },
+        { "A_bell1k",   { B (BandType::Bell, 1000, 6, 1) }, none },
+        { "B_shelves",  { B (BandType::LowShelf, 100, 6, 0.71), B (BandType::HighShelf, 10000, 6, 0.71), B (BandType::Bell, 18000, 6, 1) }, none },
+        { "C_bell30",   { B (BandType::Bell, 30, 6, 1) }, none },
+        { "D_ms",       { B (BandType::Bell, 1000, 6, 1, Channel::Mid), B (BandType::Bell, 3000, -6, 1, Channel::Side) }, none },
+        { "E_hp30_24",  { B (BandType::HighPass, 30, 0, 1, Channel::Stereo, 24) }, none },
+        { "F_close",    { B (BandType::Bell, 1000, 6, 1), B (BandType::Bell, 1500, 6, 1) }, none },
+        { "G_tilt",     { B (BandType::Bell, 2000, -3, 2) }, t3 },
     };
+    const char* modeName[3] = { "lin", "nat", "min" };
     for (auto& s : sc)
-        for (int mode = 0; mode < 2; ++mode)
-            for (int q : { 1, 2, 3 })
+        for (int mode = 0; mode < 3; ++mode)
+            for (int q : { 0, 1, 2 })
             {
-                auto r = design (s.bands.data(), (int) s.bands.size(), fs, q, mode == 0 ? PhaseMode::Natural : PhaseMode::Linear);
-                dump (out + "/" + s.id + (mode == 0 ? "_nat" : "_lin") + "_q" + std::to_string (q) + ".bin", r);
+                if (q == 2 && std::string (s.id) != "C_bell30" && std::string (s.id) != "A_bell1k") continue;
+                auto r = design (s.bands.data(), (int) s.bands.size(), s.tilt, fs, q, (PhaseMode) mode);
+                dump (out + "/" + s.id + "_" + modeName[mode] + "_q" + std::to_string (q) + ".bin", r);
             }
     std::printf ("done\n");
     return 0;

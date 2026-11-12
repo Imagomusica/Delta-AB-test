@@ -1,8 +1,9 @@
 // EqDesign.h - pure C++17, no JUCE dependency.
 // Designs FIR impulse responses for a parametric EQ from analog-prototype magnitudes
 // evaluated directly on the frequency grid (no bilinear transform => no cramping at Nyquist).
-//   Natural mode : minimum phase (cepstral method), the phase an analog EQ would have
-//   Linear mode  : zero phase, delayed by L/2
+//   Linear  : zero phase, delayed by L/2
+//   Natural : phase of the equivalent analog filters, blended into minimum phase near Nyquist
+//   Minimal : pure minimum phase of the designed magnitude (cepstral method)
 // Stereo handling: bands act on L, R, M or S. The result is a 2x2 filter matrix
 //   outL = LL*inL + LR*inR ,  outR = RL*inL + RR*inR
 #pragma once
@@ -18,7 +19,7 @@ constexpr double kPi = 3.14159265358979323846;
 
 enum class BandType { Bell = 0, LowShelf, HighShelf, HighPass, LowPass, Notch };
 enum class Channel { Stereo = 0, Left, Right, Mid, Side };
-enum class PhaseMode { Natural = 0, Linear };
+enum class PhaseMode { Linear = 0, Natural = 1, Minimal = 2 };
 
 struct Band
 {
@@ -31,77 +32,96 @@ struct Band
     Channel ch = Channel::Stereo;
 };
 
+// Tilt: smooth see-saw around a pivot, +db at the top, -db at the bottom
+struct Tilt
+{
+    bool on = false;
+    double db = 0.0;
+    double pivot = 650.0;
+};
+
 constexpr int kMaxBands = 8;
 
-// ---------------------------------------------------------------------------
-// Magnitude (dB) of one band at frequency f (analog prototype, exact at every f)
-inline double bandMagnitudeDb (const Band& b, double f)
+inline double tiltDb (const Tilt& t, double f)
 {
-    if (! b.on) return 0.0;
+    if (! t.on) return 0.0;
+    return t.db * std::tanh (std::log2 (std::max (f, 1.0) / t.pivot) / 2.2);
+}
+
+// ---------------------------------------------------------------------------
+// Complex analog response of one band at frequency f
+inline cd bandResponse (const Band& b, double f)
+{
+    if (! b.on) return cd (1.0, 0.0);
     const double x = f / b.freq;
     const double x2 = x * x;
     const double q = std::max (b.q, 0.05);
     const double A = std::pow (10.0, b.gainDb / 40.0);
-    double mag = 1.0;
 
     switch (b.type)
     {
         case BandType::Bell:
         {
             const cd num (1.0 - x2, x * A / q), den (1.0 - x2, x / (A * q));
-            mag = std::abs (num) / std::abs (den);
-            break;
+            return num / den;
         }
         case BandType::LowShelf:
         {
             const double r = std::sqrt (A) / q;
             const cd num (A - x2, x * r), den (1.0 - A * x2, x * r);
-            mag = A * std::abs (num) / std::abs (den);
-            break;
+            return A * num / den;
         }
         case BandType::HighShelf:
         {
             const double r = std::sqrt (A) / q;
             const cd num (1.0 - A * x2, x * r), den (A - x2, x * r);
-            mag = A * std::abs (num) / std::abs (den);
-            break;
+            return A * num / den;
         }
         case BandType::Notch:
         {
             const cd num (1.0 - x2, 0.0), den (1.0 - x2, x / q);
-            mag = std::abs (num) / std::abs (den);
-            break;
+            return num / den;
         }
         case BandType::HighPass:
         case BandType::LowPass:
         {
             const int n = std::max (1, b.slopeDbOct / 6);          // Butterworth order
-            const double p = std::pow (x, 2.0 * n);
-            mag = (b.type == BandType::LowPass) ? 1.0 / std::sqrt (1.0 + p)
-                                                : std::sqrt (p / (1.0 + p));
-            break;
+            const cd s (0.0, x);
+            cd B (1.0, 0.0);
+            for (int k = 1; k <= n; ++k)
+                B *= (s - std::polar (1.0, kPi * (double) (2 * k + n - 1) / (double) (2 * n)));
+            if (b.type == BandType::LowPass) return cd (1.0, 0.0) / B;
+            cd sn (1.0, 0.0);
+            for (int k = 0; k < n; ++k) sn *= s;
+            return sn / B;
         }
     }
-    return 20.0 * std::log10 (std::max (mag, 1e-12));
+    return cd (1.0, 0.0);
 }
 
-// Sum of all enabled bands acting on a channel group (dB)
-inline double totalMagnitudeDb (const Band* bands, int n, Channel group, double f)
+inline double bandMagnitudeDb (const Band& b, double f)
+{
+    if (! b.on) return 0.0;
+    return 20.0 * std::log10 (std::max (std::abs (bandResponse (b, f)), 1e-12));
+}
+
+inline bool bandHitsGroup (const Band& b, Channel group)
+{
+    return (b.ch == Channel::Stereo && (group == Channel::Left || group == Channel::Right)) || b.ch == group;
+}
+
+// Sum of all enabled bands (+ tilt on the L/R stage) acting on a channel group (dB)
+inline double totalMagnitudeDb (const Band* bands, int n, Channel group, double f, const Tilt* tilt = nullptr)
 {
     double db = 0.0;
     for (int i = 0; i < n; ++i)
-    {
-        const auto& b = bands[i];
-        if (! b.on) continue;
-        const bool hit = (b.ch == Channel::Stereo && (group == Channel::Left || group == Channel::Right))
-                         || b.ch == group;
-        if (hit) db += bandMagnitudeDb (b, f);
-    }
+        if (bands[i].on && bandHitsGroup (bands[i], group)) db += bandMagnitudeDb (bands[i], f);
+    if (tilt != nullptr && (group == Channel::Left || group == Channel::Right)) db += tiltDb (*tilt, f);
     return db;
 }
 
 // ---------------------------------------------------------------------------
-// Minimal radix-2 FFT (in place). sign = -1 forward, +1 inverse (unscaled)
+// Minimal radix-2 FFT (in place). inverse = false forward, true inverse (unscaled)
 class Fft
 {
 public:
@@ -153,17 +173,22 @@ struct DesignResult
     int latencySamples = 0;              // inherent delay of the filter (L/2 in Linear mode, else 0)
 };
 
-inline int irLengthFor (double fs, int quality)  // quality 0..3
+// Filter duration in seconds for each resolution setting
+inline double durationFor (int quality)
 {
-    static const int base[4] = { 4096, 8192, 16384, 32768 };
-    int scale = 1;
-    if (fs > 70000.0) scale = 2;
-    if (fs > 140000.0) scale = 4;
-    return base[std::clamp (quality, 0, 3)] * scale;
+    static const double d[4] = { 0.35, 0.7, 1.4, 2.8 };
+    return d[std::clamp (quality, 0, 3)];
+}
+
+inline int irLengthFor (double fs, int quality)
+{
+    const double target = durationFor (quality) * fs;
+    const int p = (int) std::lround (std::log2 (std::max (target, 256.0)));
+    return 1 << p;
 }
 
 // Builds the four impulse responses.
-inline DesignResult design (const Band* bands, int numBands, double fs, int quality, PhaseMode mode)
+inline DesignResult design (const Band* bands, int numBands, const Tilt& tilt, double fs, int quality, PhaseMode mode)
 {
     const int L = irLengthFor (fs, quality);
     const size_t N = (size_t) L * 4;
@@ -179,34 +204,9 @@ inline DesignResult design (const Band* bands, int numBands, double fs, int qual
         if (bands[i].on && (bands[i].ch == Channel::Mid || bands[i].ch == Channel::Side))
             res.crossActive = true;
 
-    // frequency response (complex) of each channel group on bins 0..N-1
-    auto groupSpectrum = [&] (Channel g, bool withDelay)
+    // minimum-phase spectrum from a log-magnitude array (symmetric, length N)
+    auto minPhase = [&] (const std::vector<double>& lnMag)
     {
-        std::vector<cd> H (N);
-        std::vector<double> lnMag (N);
-        for (size_t k = 0; k <= half; ++k)
-        {
-            const double f = fs * (double) k / (double) N;
-            const double db = totalMagnitudeDb (bands, numBands, g, std::max (f, 1e-3));
-            const double mag = std::max (std::pow (10.0, db / 20.0), 1e-5);  // -100 dB floor
-            lnMag[k] = std::log (mag);
-            if (k > 0 && k < half) lnMag[N - k] = lnMag[k];
-        }
-
-        if (mode == PhaseMode::Linear)
-        {
-            for (size_t k = 0; k < N; ++k) H[k] = cd (std::exp (lnMag[k]), 0.0);
-            // pure delay of L/2 samples (applied once per signal path)
-            if (withDelay)
-            for (size_t k = 0; k < N; ++k)
-            {
-                const double kk = (k <= half) ? (double) k : (double) k - (double) N;
-                H[k] *= std::polar (1.0, -2.0 * kPi * kk * (double) (L / 2) / (double) N);
-            }
-            return H;
-        }
-
-        // minimum phase via real cepstrum
         std::vector<cd> c (N);
         for (size_t k = 0; k < N; ++k) c[k] = cd (lnMag[k], 0.0);
         fft.transform (c, true);
@@ -216,7 +216,83 @@ inline DesignResult design (const Band* bands, int numBands, double fs, int qual
         for (size_t n = 1; n < half; ++n) folded[n] = 2.0 * c[n].real();
         folded[half] = c[half].real();
         fft.transform (folded, false);
-        for (size_t k = 0; k < N; ++k) H[k] = std::exp (folded[k]);
+        for (auto& v : folded) v = std::exp (v);
+        return folded;
+    };
+
+    const double fNyq = fs / 2.0;
+    auto naturalWeight = [&] (double f)           // 1 below 0.45 Nyquist, 0 above 0.95 Nyquist
+    {
+        const double x = f / fNyq;
+        if (x <= 0.45) return 1.0;
+        if (x >= 0.95) return 0.0;
+        return 0.5 * (1.0 + std::cos (kPi * (x - 0.45) / 0.5));
+    };
+
+    // minimum-phase spectrum of the tilt alone (Natural mode needs it once)
+    std::vector<cd> tiltMin;
+    if (mode == PhaseMode::Natural && tilt.on && std::abs (tilt.db) > 1e-9)
+    {
+        std::vector<double> ln (N);
+        for (size_t k = 0; k <= half; ++k)
+        {
+            const double db = tiltDb (tilt, fs * (double) k / (double) N);
+            ln[k] = db / 20.0 * std::log (10.0);
+            if (k > 0 && k < half) ln[N - k] = ln[k];
+        }
+        tiltMin = minPhase (ln);
+    }
+
+    // frequency response (complex) of each channel group on bins 0..N-1
+    auto groupSpectrum = [&] (Channel g, bool withDelay)
+    {
+        std::vector<double> lnMag (N);
+        const bool lr = (g == Channel::Left || g == Channel::Right);
+        for (size_t k = 0; k <= half; ++k)
+        {
+            const double f = fs * (double) k / (double) N;
+            const double db = totalMagnitudeDb (bands, numBands, g, std::max (f, 1e-3), lr ? &tilt : nullptr);
+            const double mag = std::max (std::pow (10.0, db / 20.0), 1e-5);  // -100 dB floor
+            lnMag[k] = std::log (mag);
+            if (k > 0 && k < half) lnMag[N - k] = lnMag[k];
+        }
+
+        if (mode == PhaseMode::Linear)
+        {
+            std::vector<cd> H (N);
+            for (size_t k = 0; k < N; ++k) H[k] = cd (std::exp (lnMag[k]), 0.0);
+            if (withDelay)                                  // pure delay of L/2 samples, applied once per path
+                for (size_t k = 0; k < N; ++k)
+                {
+                    const double kk = (k <= half) ? (double) k : (double) k - (double) N;
+                    H[k] *= std::polar (1.0, -2.0 * kPi * kk * (double) (L / 2) / (double) N);
+                }
+            return H;
+        }
+
+        auto H = minPhase (lnMag);
+
+        if (mode == PhaseMode::Natural)
+        {
+            // pull the phase towards that of the equivalent analog filters (below ~0.45 Nyquist)
+            for (size_t k = 1; k < half; ++k)
+            {
+                const double f = fs * (double) k / (double) N;
+                const double w = naturalWeight (f);
+                if (w <= 0.0) { H[N - k] = std::conj (H[k]); continue; }
+                cd A (1.0, 0.0);
+                for (int i = 0; i < numBands; ++i)
+                    if (bands[i].on && bandHitsGroup (bands[i], g)) A *= bandResponse (bands[i], f);
+                if (lr && ! tiltMin.empty()) A *= tiltMin[k];
+                const double am = std::abs (A), hm = std::abs (H[k]);
+                if (am > 1e-9 && hm > 1e-9)
+                {
+                    const cd ratio = (A / am) * std::conj (H[k] / hm);
+                    H[k] *= std::polar (1.0, std::arg (ratio) * w);
+                }
+                H[N - k] = std::conj (H[k]);
+            }
+        }
         return H;
     };
 
@@ -237,7 +313,7 @@ inline DesignResult design (const Band* bands, int numBands, double fs, int qual
             if (pos > 1.0 - edge) { const double t = (1.0 - pos) / edge;  return 0.5 - 0.5 * std::cos (kPi * t); }
             return 1.0;
         }
-        const double start = 0.85;                                          // natural: fade only the tail
+        const double start = 0.85;                                          // minimum phase: fade only the tail
         if (pos > start) { const double t = (pos - start) / (1.0 - start); return 0.5 + 0.5 * std::cos (kPi * t); }
         return 1.0;
     };
@@ -250,7 +326,6 @@ inline DesignResult design (const Band* bands, int numBands, double fs, int qual
             out[n] = (float) (t[n].real() / (double) N * taper (n));
     };
 
-    std::vector<cd> t (N);
     if (! res.crossActive)
     {
         emit (HL, res.ll);
