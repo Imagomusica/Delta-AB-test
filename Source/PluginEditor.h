@@ -68,13 +68,13 @@ public:
 private:
     MasteringEQAudioProcessor& proc;
     const Palette& pal;
-    NagraSwitch onBtn, postBtn, minBtn;
+    NagraSwitch onBtn, postBtn, minBtn, linBtn;
     PresetGlyph pLow, pMid, pHigh;
     juce::ComboBox msBox, sloBox, shiBox;
     juce::Slider knob[8];
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> knobAtt[8];
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> msAtt, sloAtt, shiAtt;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> onAtt, postAtt, minAtt;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> onAtt, postAtt, minAtt, linAtt;
 };
 
 // ---------------------------------------------------------------------------

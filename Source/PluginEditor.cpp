@@ -850,7 +850,7 @@ void PresetGlyph::paintButton (juce::Graphics& g, bool highlighted, bool)
 }
 
 CompPanel::CompPanel (MasteringEQAudioProcessor& p, const Palette& pl)
-    : proc (p), pal (pl), onBtn ("SPLIT COMP", pl), postBtn ("POST EQ", pl), minBtn ("LINEAIRE", pl),
+    : proc (p), pal (pl), onBtn ("SPLIT COMP", pl), postBtn ("POST EQ", pl), minBtn ("LINEAIRE", pl), linBtn ("LOI LOG", pl),
       pLow (0, pl), pMid (1, pl), pHigh (2, pl)
 {
     static const char* ids[8] { "comp_lo", "comp_hi", "comp_thr", "comp_ratio", "comp_att", "comp_rel", "comp_knee", "comp_mk" };
@@ -865,7 +865,7 @@ CompPanel::CompPanel (MasteringEQAudioProcessor& p, const Palette& pl)
         knobAtt[i] = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.apvts, ids[i], s);
     }
     knob[7].getProperties().set ("bipolar", true);
-    for (auto* b : { &onBtn, &postBtn, &minBtn }) addAndMakeVisible (b);
+    for (auto* b : { &onBtn, &postBtn, &minBtn, &linBtn }) addAndMakeVisible (b);
     for (auto* c : { &msBox, &sloBox, &shiBox }) addAndMakeVisible (c);
     for (auto* b : { &pLow, &pMid, &pHigh }) addAndMakeVisible (b);
     pLow.setTooltip ("Grave seulement");  pMid.setTooltip ("Medium seulement");  pHigh.setTooltip ("Aigu seulement");
@@ -880,6 +880,7 @@ CompPanel::CompPanel (MasteringEQAudioProcessor& p, const Palette& pl)
     shiAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, "comp_shi", shiBox);
     onAtt   = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, "comp_on", onBtn);
     postAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, "comp_post", postBtn);
+    linAtt  = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, "comp_lin", linBtn);
     minAtt  = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, "comp_min", minBtn);
 }
 
@@ -888,6 +889,7 @@ void CompPanel::resized()
     onBtn.setBounds (6, 8, 100, 26);
     postBtn.setBounds (110, 8, 82, 26);
     minBtn.setBounds (196, 8, 92, 26);
+    linBtn.setBounds (130, 42, 104, 20);
     msBox.setBounds (292, 9, 78, 24);
     sloBox.setBounds (374, 9, 82, 24);
     shiBox.setBounds (460, 9, 82, 24);
@@ -901,6 +903,7 @@ void CompPanel::refresh()
 {
     postBtn.setLabel (postBtn.getToggleState() ? "POST EQ" : "PRE EQ");
     minBtn.setLabel (minBtn.getToggleState() ? "MINIMALE" : "LINEAIRE");
+    linBtn.setLabel (linBtn.getToggleState() ? "LOI LINEAIRE" : "LOI LOG (dB)");
     const float a = onBtn.getToggleState() ? 1.0f : 0.45f;
     for (auto& k : knob) k.setAlpha (a);
     repaint();

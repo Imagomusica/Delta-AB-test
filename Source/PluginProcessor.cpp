@@ -81,6 +81,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout MasteringEQAudioProcessor::c
         StringArray cs { "6 dB/oct", "12 dB/oct", "24 dB/oct", "48 dB/oct" };
         layout.add (std::make_unique<AudioParameterBool>   (ParameterID { "comp_on", 1 },   "Comp On", false));
         layout.add (std::make_unique<AudioParameterBool>   (ParameterID { "comp_post", 1 }, "Comp after EQ", true));
+        layout.add (std::make_unique<AudioParameterBool>   (ParameterID { "comp_lin", 1 },  "Comp linear law", false));
         layout.add (std::make_unique<AudioParameterBool>   (ParameterID { "comp_min", 1 },  "Comp minimum phase", false));
         layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "comp_ms", 1 },   "Comp channels", StringArray { "Stereo", "Mid/Side", "Mid", "Side" }, 0));
         layout.add (std::make_unique<AudioParameterFloat>  (ParameterID { "comp_lo", 1 },   "Comp low cut", logRange (20.0f, 20000.0f), 20.0f));
@@ -481,8 +482,34 @@ void MasteringEQAudioProcessor::runComp (float* L, float* R, int n)
     if (R) { std::copy (R, R + n, compBufR.getWritePointer (0)); conv (convCR, compBufR); }
 
     compDelay.setDelay ((float) std::min (latencyComp.load(), 1090000));
+    const bool linLaw = get ("comp_lin") > 0.5f;
+    const float thrLin = std::pow (10.0f, thr / 20.0f);
+    int chIdx = 0;
     auto gain = [&] (float det, float& st)
     {
+        if (linLaw)
+        {
+            // linear amplitude law: above the threshold amplitude T the excess is divided by the ratio
+            float& g = compLin[chIdx];
+            const float x = std::max (det, 1.0e-9f);
+            // soft knee in the amplitude domain: cubic Hermite between slope 1 (below) and slope 1/ratio (above)
+            const float kh = std::pow (10.0f, knee / 40.0f);
+            const float xl = thrLin / kh, xu = thrLin * kh;
+            const float r1 = 1.0f + slope;
+            float y = x;
+            if (x >= xu || knee <= 0.01f) y = x > thrLin ? thrLin + (x - thrLin) * r1 : x;
+            if (knee > 0.01f && x > xl && x < xu)
+            {
+                const float yu = thrLin + (xu - thrLin) * r1, w = xu - xl, t = (x - xl) / w;
+                const float t2 = t * t, t3 = t2 * t;
+                y = (2*t3 - 3*t2 + 1) * xl + (t3 - 2*t2 + t) * w + (-2*t3 + 3*t2) * yu + (t3 - t2) * w * r1;
+            }
+            const float target = std::min (1.0f, y / x);
+            const float c = target < g ? aC : rC;
+            g = c * g + (1.0f - c) * target;
+            st = 20.0f * std::log10 (std::max (g, 1.0e-6f));
+            return g * std::pow (10.0f, mk / 20.0f);
+        }
         const float lvl = 20.0f * std::log10 (std::max (det, 1.0e-6f));
         const float over = lvl - thr;
         float gr;
@@ -505,6 +532,7 @@ void MasteringEQAudioProcessor::runComp (float* L, float* R, int n)
 
         if (! R || ms == 0)
         {
+            chIdx = 0;
             const float g = gain (R ? std::max (std::abs (bl[i]), std::abs (br[i])) : std::abs (bl[i]), compState[0]);
             L[i] = dl + (g - 1.0f) * bl[i];
             if (R) R[i] = dr + (g - 1.0f) * br[i];
@@ -512,7 +540,9 @@ void MasteringEQAudioProcessor::runComp (float* L, float* R, int n)
         else
         {
             const float m = 0.5f * (bl[i] + br[i]), s = 0.5f * (bl[i] - br[i]);
+            chIdx = 0;
             const float gm = (ms == 1 || ms == 2) ? gain (std::abs (m), compState[0]) : 1.0f;
+            chIdx = 1;
             const float gs = (ms == 1 || ms == 3) ? gain (std::abs (s), compState[1]) : 1.0f;
             const float m2 = m * gm, s2 = s * gs;
             L[i] = dl + (m2 + s2 - bl[i]);

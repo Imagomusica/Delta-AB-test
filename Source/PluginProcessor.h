@@ -117,6 +117,7 @@ private:
     juce::AudioBuffer<float> compBufL, compBufR;
     std::atomic<int> latencyEq { 0 }, latencyComp { 0 }, latencyLine { 0 };
     float compState[2] { 0.0f, 0.0f };
+    float compLin[2] { 1.0f, 1.0f };
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> gainSmooth, bypassSmooth;
 
     std::atomic<double> currentSampleRate { 0.0 };
