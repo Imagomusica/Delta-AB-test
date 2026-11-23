@@ -44,6 +44,7 @@ public:
     static juce::String pid (int band, const char* name) { return "b" + juce::String (band + 1) + "_" + name; }
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
     eqd::Band readBand (int i) const;
+    void applyPreRingLimit (eqd::Band&) const;
     eqd::Tilt readTilt() const;
     eqd::Tilt readLine() const;                      // straight-line tilt (dB/oct), last stage
     eqd::PhaseMode readMode() const;

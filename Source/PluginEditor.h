@@ -168,6 +168,27 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+class PreRingPanel : public juce::Component
+{
+public:
+    PreRingPanel (MasteringEQAudioProcessor&, const Palette&);
+    void paint (juce::Graphics&) override;
+    void resized() override;
+    void refresh();
+
+private:
+    MasteringEQAudioProcessor& proc;
+    const Palette& pal;
+    juce::TextButton modeBtn[3];
+    NagraSwitch limSw;
+    juce::Slider blendKnob, qKnob;
+    juce::ComboBox slopeBox;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> blendAtt, qAtt;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> slopeAtt;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> limAtt;
+};
+
+// ---------------------------------------------------------------------------
 class DuneContent : public juce::Component, private juce::Timer
 {
 public:
@@ -190,7 +211,9 @@ private:
     NagraSwitch curvesBtn, curvesTopBtn, tiltBtn, bypassBtn, lookBtn, eqBtn;
     juce::ComboBox osBox;
     NagraSwitch lineBtn;
-    juce::Slider lineSlider, linePivot, preKnobEq;
+    juce::Slider lineSlider, linePivot;
+    NagraSwitch prBtn;
+    PreRingPanel prPanel;
     CompPanel comp;
     SrcPanel src;
     juce::TextButton plusBtn { "+" }, minusBtn { "-" };
@@ -202,7 +225,7 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> tiltAtt, bypassAtt, curvesAtt, curvesTopAtt, lookAtt, eqAtt;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> osAtt;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> lineAtt;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> lineSAtt, linePAtt, preEqAtt;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> lineSAtt, linePAtt;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> tiltSliderAtt, outAtt;
     juce::String footerText;
     int lastTheme = -1;

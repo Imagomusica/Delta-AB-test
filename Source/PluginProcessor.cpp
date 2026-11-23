@@ -73,6 +73,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout MasteringEQAudioProcessor::c
     layout.add (std::make_unique<AudioParameterFloat>  (ParameterID { "eq_pre", 1 }, "EQ pre-ringing (linear phase blend)",
                                                         NormalisableRange<float> (0.0f, 100.0f, 1.0f), 100.0f,
                                                         AudioParameterFloatAttributes().withLabel ("%")));
+    layout.add (std::make_unique<AudioParameterBool>   (ParameterID { "pr_lim", 1 }, "Pre-ringing limiter On", false));
+    layout.add (std::make_unique<AudioParameterFloat>  (ParameterID { "pr_qmax", 1 }, "Pre-ringing max Q", logRange (0.5f, 64.0f), 4.0f));
+    layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "pr_slope", 1 }, "Pre-ringing max slope", StringArray { "6 dB/oct", "12 dB/oct", "24 dB/oct", "48 dB/oct" }, 1));
     layout.add (std::make_unique<AudioParameterFloat>  (ParameterID { "src_pre", 1 }, "SRC pre-ringing",
                                                         NormalisableRange<float> (0.0f, 100.0f, 1.0f), 100.0f,
                                                         AudioParameterFloatAttributes().withLabel ("%")));
@@ -145,6 +148,15 @@ juce::AudioProcessorValueTreeState::ParameterLayout MasteringEQAudioProcessor::c
 int MasteringEQAudioProcessor::slopeFromIndex (int idx)
 {
     return kSlopes[juce::jlimit (0, 7, idx)];
+}
+
+// Pre-ringing limiter: in linear-phase mode, caps the Q and the slope of the bands (shorter ringing)
+void MasteringEQAudioProcessor::applyPreRingLimit (eqd::Band& b) const
+{
+    if (readMode() != eqd::PhaseMode::Linear || apvts.getRawParameterValue ("pr_lim")->load() < 0.5f) return;
+    b.q = std::min (b.q, (double) apvts.getRawParameterValue ("pr_qmax")->load());
+    static const int caps[4] { 6, 12, 24, 48 };
+    b.slopeDbOct = std::min (b.slopeDbOct, caps[juce::jlimit (0, 3, (int) std::lround (apvts.getRawParameterValue ("pr_slope")->load()))]);
 }
 
 eqd::Band MasteringEQAudioProcessor::readBand (int i) const
@@ -268,7 +280,7 @@ void MasteringEQAudioProcessor::runDesign (int mask)
     }
     eqd::Band bands[eqd::kMaxBands];
     const bool eqOn = apvts.getRawParameterValue ("eq_on")->load() > 0.5f;
-    for (int i = 0; i < eqd::kMaxBands; ++i) { bands[i] = readBand (i); if (! eqOn) bands[i].on = false; }
+    for (int i = 0; i < eqd::kMaxBands; ++i) { bands[i] = readBand (i); applyPreRingLimit (bands[i]); if (! eqOn) bands[i].on = false; }
     const auto res = eqd::design (bands, eqd::kMaxBands, readTilt(), fsw, quality, readMode(), apvts.getRawParameterValue ("eq_pre")->load() / 100.0);
 
     auto load = [&] (HotConv& c, const std::vector<float>& v)

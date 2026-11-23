@@ -292,6 +292,7 @@ void DuneField::timerCallback()
     for (int i = 0; i < eqd::kMaxBands; ++i)
     {
         bands[i] = proc.readBand (i);
+        proc.applyPreRingLimit (bands[i]);
         if (paramValue (proc.apvts, "eq_on") < 0.5f) bands[i].on = false;
         if (bands[i].on && (bands[i].ch == eqd::Channel::Mid || bands[i].ch == eqd::Channel::Side)) anyMS = true;
     }
@@ -1147,7 +1148,73 @@ void SrcPanel::paint (juce::Graphics& g)
 }
 
 // ===========================================================================
-DuneContent::DuneContent (MasteringEQAudioProcessor& p) : proc (p), field (p, palette), curvesBtn ("COURBES", palette), curvesTopBtn ("DESSUS", palette), tiltBtn ("TILT", palette), bypassBtn ("BYPASS", palette), eqBtn ("EQ", palette), lookBtn ("ANTICIPATION", palette), lineBtn ("TILT DROIT", palette), comp (p, palette), src (p, palette)
+// ===========================================================================
+// Pre-ringing of the linear-phase EQ: phase family, blend with minimum phase, cap on Q and slope
+PreRingPanel::PreRingPanel (MasteringEQAudioProcessor& p, const Palette& pl) : proc (p), pal (pl), limSw ("LIMITER Q + PENTE", pl)
+{
+    static const char* names[3] { "LINEAIRE", "NATURELLE", "MINIMALE" };
+    for (int i = 0; i < 3; ++i)
+    {
+        modeBtn[i].setButtonText (names[i]);
+        modeBtn[i].onClick = [i] (void) {};
+        addAndMakeVisible (modeBtn[i]);
+    }
+    modeBtn[0].onClick = [this] { setParamNormalised (proc.apvts, "mode", 0.0f); };
+    modeBtn[1].onClick = [this] { setParamNormalised (proc.apvts, "mode", 1.0f); };
+    modeBtn[2].onClick = [this] { setParamNormalised (proc.apvts, "mode", 2.0f); };
+    for (auto* s : { &blendKnob, &qKnob })
+    {
+        s->setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
+        s->setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
+        s->setRotaryParameters (juce::MathConstants<float>::pi * 1.2f, juce::MathConstants<float>::pi * 2.8f, true);
+        s->setMouseDragSensitivity (200);
+        addAndMakeVisible (s);
+    }
+    addAndMakeVisible (limSw);
+    addAndMakeVisible (slopeBox);
+    fillCombo (proc.apvts, "pr_slope", slopeBox);
+    blendAtt = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.apvts, "eq_pre", blendKnob);
+    qAtt     = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.apvts, "pr_qmax", qKnob);
+    slopeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, "pr_slope", slopeBox);
+    limAtt   = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, "pr_lim", limSw);
+}
+
+void PreRingPanel::resized()
+{
+    for (int i = 0; i < 3; ++i) modeBtn[i].setBounds (8 + 104 * i, 26, 100, 24);
+    blendKnob.setBounds (30, 72, 50, 50);
+    limSw.setBounds (140, 62, 176, 24);
+    qKnob.setBounds (150, 92, 44, 44);
+    slopeBox.setBounds (232, 100, 88, 24);
+}
+
+void PreRingPanel::refresh()
+{
+    const int mode = (int) std::lround (paramValue (proc.apvts, "mode"));
+    for (int i = 0; i < 3; ++i) modeBtn[i].setToggleState (i == mode, juce::dontSendNotification);
+    repaint();
+}
+
+void PreRingPanel::paint (juce::Graphics& g)
+{
+    g.setColour (pal.bg.withAlpha (0.94f));
+    g.fillRect (getLocalBounds());
+    g.setColour (pal.ring);
+    g.drawRect (getLocalBounds(), 1);
+    g.setColour (pal.dim);
+    g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 9.5f, juce::Font::bold)));
+    g.drawText ("PRE-RINGING : FAMILLE DE PHASE", 8, 8, 320, 12, juce::Justification::left);
+    g.drawText ("MELANGE", 6, 124, 100, 11, juce::Justification::centred);
+    g.drawText ("Q MAX", 144, 136, 56, 11, juce::Justification::centred);
+    g.drawText ("PENTE MAX", 232, 86, 88, 11, juce::Justification::centred);
+    const double bl = paramValue (proc.apvts, "eq_pre");
+    g.setColour (pal.fg);
+    g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 10.5f, juce::Font::plain)));
+    g.drawText (juce::String ((int) bl) + " %", 6, 135, 100, 13, juce::Justification::centred);
+    g.drawText (juce::String (paramValue (proc.apvts, "pr_qmax"), 1), 196, 108, 34, 13, juce::Justification::left);
+}
+
+DuneContent::DuneContent (MasteringEQAudioProcessor& p) : proc (p), field (p, palette), curvesBtn ("COURBES", palette), curvesTopBtn ("DESSUS", palette), tiltBtn ("TILT", palette), bypassBtn ("BYPASS", palette), eqBtn ("EQ", palette), lookBtn ("ANTICIPATION", palette), lineBtn ("TILT DROIT", palette), prBtn ("PRE-RINGING EQ", palette), prPanel (p, palette), comp (p, palette), src (p, palette)
 {
     setLookAndFeel (&lnf);
     lnf.setPalette (palette);
@@ -1189,7 +1256,12 @@ DuneContent::DuneContent (MasteringEQAudioProcessor& p) : proc (p), field (p, pa
     addAndMakeVisible (osBox);
     addAndMakeVisible (src);
     addAndMakeVisible (lineBtn);
-    for (auto* s : { &lineSlider, &linePivot, &preKnobEq })
+    addAndMakeVisible (prBtn);
+    addAndMakeVisible (prPanel);
+    prPanel.setVisible (std::getenv ("DUNE_PR") != nullptr);
+    if (std::getenv ("DUNE_PR")) prBtn.setToggleState (true, juce::dontSendNotification);
+    prBtn.onClick = [this] { prPanel.setVisible (prBtn.getToggleState()); prPanel.toFront (false); };
+    for (auto* s : { &lineSlider, &linePivot })
     {
         s->setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
         s->setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
@@ -1200,8 +1272,6 @@ DuneContent::DuneContent (MasteringEQAudioProcessor& p) : proc (p), field (p, pa
     lineAtt   = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, "tilt_line", lineBtn);
     lineSAtt  = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.apvts, "line_db", lineSlider);
     linePAtt  = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.apvts, "line_freq", linePivot);
-    preEqAtt  = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.apvts, "eq_pre", preKnobEq);
-    preKnobEq.setTooltip ("Pre-ringing de l'EQ lineaire: 100 % = phase lineaire pure, 0 % = phase minimale (aucun pre-ringing)");
     addAndMakeVisible (comp);
     fillCombo (proc.apvts, "os", osBox);
     osAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, "os", osBox);
@@ -1266,6 +1336,8 @@ void DuneContent::timerCallback()
     curvesTopBtn.setLabel (curvesTopBtn.getToggleState() ? "DESSUS" : "DESSOUS");
     curvesTopBtn.setEnabled (curvesBtn.getToggleState());
     comp.refresh();
+    prPanel.refresh();
+    prBtn.setLabel ("PRE-RINGING " + juce::String ((int) paramValue (proc.apvts, "eq_pre")) + " %");
 
     const double fs = std::max (proc.getSampleRate(), 1.0);
     footerText = juce::String::fromUTF8 ("64-bit  \xC2\xB7  latence ")
@@ -1296,7 +1368,9 @@ void DuneContent::resized()
     lineBtn.setBounds (386, 761, 112, 24);
     lineSlider.setBounds (506, 758, 30, 30);
     linePivot.setBounds (700, 758, 30, 30);
-    preKnobEq.setBounds (826, 758, 30, 30);
+    prBtn.setBounds (826, 761, 176, 24);
+    prPanel.setBounds (680, 598, 330, 150);
+    prPanel.toFront (false);
     comp.onFold = [this] { resized(); };
     comp.setBounds (690, 45 + 6, 546, comp.isCollapsed() ? 44 : 180);
     src.setVisible (! comp.isCollapsed());
@@ -1337,13 +1411,6 @@ void DuneContent::paint (juce::Graphics& g)
         g.setColour (palette.fg);
         g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 11.5f, juce::Font::plain)));
         g.drawText ((sl > 0.005 ? "+" : "") + juce::String (sl, 2) + " dB/oct", 540, 761, 82, 24, juce::Justification::centredLeft);
-        {
-            const double pr = paramValue (proc.apvts, "eq_pre");
-            const bool lin = (int) std::lround (paramValue (proc.apvts, "mode")) == 0;
-            g.setColour (lin ? palette.fg : palette.dim);
-            g.drawText ("PRE-RINGING EQ " + juce::String ((int) pr) + " %", 862, 761, 140, 24, juce::Justification::centredLeft);
-            g.setColour (palette.fg);
-        }
         g.drawText (pv >= 1000.0 ? juce::String (pv / 1000.0, 2) + " kHz" : juce::String ((int) pv) + " Hz", 734, 761, 80, 24, juce::Justification::centredLeft);
     }
     g.setColour (palette.dim);
