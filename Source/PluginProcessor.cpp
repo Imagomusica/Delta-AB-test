@@ -70,6 +70,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout MasteringEQAudioProcessor::c
                                                         AudioParameterFloatAttributes().withLabel ("Hz")));
     layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "src_steep", 1 }, "SRC steepness",
                                                         StringArray { "Doux", "Moyen", "Raide", "Tres raide" }, 2));
+    layout.add (std::make_unique<AudioParameterFloat>  (ParameterID { "eq_pre", 1 }, "EQ pre-ringing (linear phase blend)",
+                                                        NormalisableRange<float> (0.0f, 100.0f, 1.0f), 100.0f,
+                                                        AudioParameterFloatAttributes().withLabel ("%")));
     layout.add (std::make_unique<AudioParameterFloat>  (ParameterID { "src_pre", 1 }, "SRC pre-ringing",
                                                         NormalisableRange<float> (0.0f, 100.0f, 1.0f), 100.0f,
                                                         AudioParameterFloatAttributes().withLabel ("%")));
@@ -99,6 +102,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout MasteringEQAudioProcessor::c
     layout.add (std::make_unique<AudioParameterBool> (ParameterID { "curves_top", 1 }, "Curves above sand", true));
 
     layout.add (std::make_unique<AudioParameterBool>  (ParameterID { "tilt_on", 1 }, "Tilt On", false));
+    layout.add (std::make_unique<AudioParameterBool>  (ParameterID { "eq_on", 1 }, "EQ bands On", true));
+    layout.add (std::make_unique<AudioParameterBool>  (ParameterID { "os_on", 1 }, "Oversampling On", true));
     layout.add (std::make_unique<AudioParameterFloat> (ParameterID { "tilt_db", 1 }, "Tilt",
                                                        NormalisableRange<float> (-6.0f, 6.0f, 0.1f), 0.0f,
                                                        AudioParameterFloatAttributes().withLabel ("dB")));
@@ -198,7 +203,7 @@ void MasteringEQAudioProcessor::parameterChanged (const juce::String& id, float)
         if (id == "comp_lo" || id == "comp_hi" || id == "comp_slo" || id == "comp_shi" || id == "comp_min") designThread.trigger (2);
         return;                                                                       // dynamics are read per block
     }
-    designThread.trigger (id == "quality" || id == "proc_os" || id == "src_cut" || id == "src_steep" || id == "src_pre" ? 7 : 5);
+    designThread.trigger (id == "quality" || id == "eq_pre" || id == "proc_os" || id == "os_on" || id == "src_cut" || id == "src_steep" || id == "src_pre" ? 7 : 5);
 }
 
 void MasteringEQAudioProcessor::updateLatency()
@@ -216,7 +221,7 @@ void MasteringEQAudioProcessor::designLine (double fs, double fsw, int quality)
     const auto t = readLine();
     if (! t.on) { latencyLine = 0; updateLatency(); return; }
     eqd::Band none[eqd::kMaxBands];                         // all bands off: only the tilt shapes the response
-    const auto r = eqd::design (none, eqd::kMaxBands, t, fsw, quality, readMode());
+    const auto r = eqd::design (none, eqd::kMaxBands, t, fsw, quality, readMode(), apvts.getRawParameterValue ("eq_pre")->load() / 100.0);
     auto load = [&] (HotConv& c, const std::vector<float>& v)
     {
         juce::AudioBuffer<float> b (1, (int) v.size());
@@ -235,7 +240,7 @@ void MasteringEQAudioProcessor::runDesign (int mask)
     const double fs = currentSampleRate.load();
     if (fs <= 0.0) return;
 
-    const int K = 1 << juce::jlimit (0, 3, (int) std::lround (apvts.getRawParameterValue ("proc_os")->load()));
+    const int K = apvts.getRawParameterValue ("os_on")->load() > 0.5f ? 1 << juce::jlimit (0, 3, (int) std::lround (apvts.getRawParameterValue ("proc_os")->load())) : 1;
     const double fsw = fs * (double) K;                       // rate at which the filters are designed and run
     int quality = (int) std::lround (apvts.getRawParameterValue ("quality")->load());
     while (quality > 0 && eqd::irLengthFor (fsw, quality) > (1 << 20)) --quality;   // keep the FFT size bounded at high rates
@@ -250,7 +255,7 @@ void MasteringEQAudioProcessor::runDesign (int mask)
         cb[0].on = cb[0].freq > 20.5;
         cb[1].type = eqd::BandType::LowPass;  cb[1].freq = get ("comp_hi"); cb[1].slopeDbOct = cs[juce::jlimit (0, 3, (int) std::lround (get ("comp_shi")))];
         cb[1].on = cb[1].freq < 19999.0;
-        const auto cr = eqd::design (cb, 2, eqd::Tilt{}, fsw, quality, get ("comp_min") > 0.5f ? eqd::PhaseMode::Minimal : eqd::PhaseMode::Linear);
+        const auto cr = eqd::design (cb, 2, eqd::Tilt{}, fsw, quality, get ("comp_min") > 0.5f ? eqd::PhaseMode::Minimal : eqd::PhaseMode::Linear, apvts.getRawParameterValue ("eq_pre")->load() / 100.0);
         for (auto* c : { &convCL, &convCR })
         {
             juce::AudioBuffer<float> b (1, (int) cr.ll.size());
@@ -262,8 +267,9 @@ void MasteringEQAudioProcessor::runDesign (int mask)
         if (! (mask & 1)) { updateLatency(); return; }
     }
     eqd::Band bands[eqd::kMaxBands];
-    for (int i = 0; i < eqd::kMaxBands; ++i) bands[i] = readBand (i);
-    const auto res = eqd::design (bands, eqd::kMaxBands, readTilt(), fsw, quality, readMode());
+    const bool eqOn = apvts.getRawParameterValue ("eq_on")->load() > 0.5f;
+    for (int i = 0; i < eqd::kMaxBands; ++i) { bands[i] = readBand (i); if (! eqOn) bands[i].on = false; }
+    const auto res = eqd::design (bands, eqd::kMaxBands, readTilt(), fsw, quality, readMode(), apvts.getRawParameterValue ("eq_pre")->load() / 100.0);
 
     auto load = [&] (HotConv& c, const std::vector<float>& v)
     {

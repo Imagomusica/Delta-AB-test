@@ -255,8 +255,13 @@ inline int irLengthFor (double fs, int quality)
 }
 
 // Builds the four impulse responses.
-inline DesignResult design (const Band* bands, int numBands, const Tilt& tilt, double fs, int quality, PhaseMode mode)
+// preRing (Linear mode only): 1 = pure linear phase (symmetric ringing); 0 = pure minimum phase (no pre-ringing).
+// In between, the phase is  (1-preRing) * minimum-phase  -  2*pi*f * preRing * L/2  : the cepstrum is folded only
+// partly, so the magnitude stays exact while the energy moves behind the main peak.
+inline DesignResult design (const Band* bands, int numBands, const Tilt& tilt, double fs, int quality, PhaseMode mode, double preRing = 1.0)
 {
+    preRing = std::clamp (preRing, 0.0, 1.0);
+    const bool partial = (mode == PhaseMode::Linear) && preRing < 0.999;
     const int L = irLengthFor (fs, quality);
     const size_t N = (size_t) L * 4;
     const size_t half = N / 2;
@@ -264,7 +269,8 @@ inline DesignResult design (const Band* bands, int numBands, const Tilt& tilt, d
 
     DesignResult res;
     res.irLength = L;
-    res.latencySamples = (mode == PhaseMode::Linear) ? L / 2 : 0;
+    const double delaySamples = (mode == PhaseMode::Linear) ? preRing * (double) (L / 2) : 0.0;
+    res.latencySamples = (mode == PhaseMode::Linear) ? (int) std::lround (delaySamples) : 0;
     for (auto* v : { &res.ll, &res.lr, &res.rl, &res.rr }) v->assign ((size_t) L, 0.0f);
 
     for (int i = 0; i < numBands; ++i)
@@ -327,12 +333,29 @@ inline DesignResult design (const Band* bands, int numBands, const Tilt& tilt, d
         if (mode == PhaseMode::Linear)
         {
             std::vector<cd> H (N);
-            for (size_t k = 0; k < N; ++k) H[k] = cd (std::exp (lnMag[k]), 0.0);
-            if (withDelay)                                  // pure delay of L/2 samples, applied once per path
+            if (partial)
+            {
+                // phase = (1-preRing) * minimum phase: take the log of the minimum-phase spectrum, keep its magnitude, scale its phase
+                // partial folding of the cepstrum scales the phase without any unwrapping
+                std::vector<cd> c (N);
+                for (size_t k = 0; k < N; ++k) c[k] = cd (lnMag[k], 0.0);
+                fft.transform (c, true);
+                for (auto& v : c) v /= (double) N;
+                std::vector<cd> folded (N, cd (0.0, 0.0));
+                const double a = 1.0 - preRing;
+                folded[0] = c[0].real();
+                for (size_t n = 1; n < half; ++n) { folded[n] = (1.0 + a) * c[n].real(); folded[N - n] = (1.0 - a) * c[n].real(); }
+                folded[half] = c[half].real();
+                fft.transform (folded, false);
+                for (size_t k = 0; k < N; ++k) H[k] = std::exp (folded[k]);
+            }
+            else
+                for (size_t k = 0; k < N; ++k) H[k] = cd (std::exp (lnMag[k]), 0.0);
+            if (withDelay)                                  // pure delay (preRing * L/2 samples), applied once per path
                 for (size_t k = 0; k < N; ++k)
                 {
                     const double kk = (k <= half) ? (double) k : (double) k - (double) N;
-                    H[k] *= std::polar (1.0, -2.0 * kPi * kk * (double) (L / 2) / (double) N);
+                    H[k] *= std::polar (1.0, -2.0 * kPi * kk * delaySamples / (double) N);
                 }
             return H;
         }
@@ -376,7 +399,8 @@ inline DesignResult design (const Band* bands, int numBands, const Tilt& tilt, d
         if (mode == PhaseMode::Linear)
         {
             const double edge = 0.2;
-            if (pos < edge)       { const double t = pos / edge;          return 0.5 - 0.5 * std::cos (kPi * t); }
+            const double leftEdge = partial ? std::min (edge, 0.5 * delaySamples / (double) L) : edge;   // never fade the main lobe
+            if (leftEdge > 1e-6 && pos < leftEdge) { const double t = pos / leftEdge; return 0.5 - 0.5 * std::cos (kPi * t); }
             if (pos > 1.0 - edge) { const double t = (1.0 - pos) / edge;  return 0.5 - 0.5 * std::cos (kPi * t); }
             return 1.0;
         }

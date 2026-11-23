@@ -1,4 +1,5 @@
 #pragma once
+#include <functional>
 #include "PluginProcessor.h"
 #include <memory>
 #include <vector>
@@ -64,11 +65,16 @@ public:
     void paint (juce::Graphics&) override;
     void resized() override;
     void refresh();
+    bool isCollapsed() const { return collapsed; }
+    std::function<void()> onFold;
 
 private:
+    void setCollapsed (bool);
+    bool collapsed = false;
+    juce::TextButton foldBtn;
     MasteringEQAudioProcessor& proc;
     const Palette& pal;
-    NagraSwitch onBtn, postBtn, minBtn, linBtn;
+    NagraSwitch onBtn, postBtn, minBtn, linBtn, msBtn;
     PresetGlyph pLow, pMid, pHigh;
     juce::ComboBox msBox, sloBox, shiBox;
     juce::Slider knob[8];
@@ -89,6 +95,8 @@ public:
 private:
     MasteringEQAudioProcessor& proc;
     const Palette& pal;
+    NagraSwitch osSw;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> osSwAtt;
     juce::ComboBox osBox, steepBox;
     juce::Slider cutKnob, preKnob;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> osAtt, steepAtt;
@@ -179,10 +187,10 @@ private:
 
     juce::TextButton modeBtn[3];
     juce::ComboBox qualityBox, tuningBox, themeBox;
-    NagraSwitch curvesBtn, curvesTopBtn, tiltBtn, bypassBtn, lookBtn;
+    NagraSwitch curvesBtn, curvesTopBtn, tiltBtn, bypassBtn, lookBtn, eqBtn;
     juce::ComboBox osBox;
     NagraSwitch lineBtn;
-    juce::Slider lineSlider, linePivot;
+    juce::Slider lineSlider, linePivot, preKnobEq;
     CompPanel comp;
     SrcPanel src;
     juce::TextButton plusBtn { "+" }, minusBtn { "-" };
@@ -191,10 +199,10 @@ private:
     std::vector<std::unique_ptr<BandStrip>> strips;
 
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> qualityAtt, tuningAtt, themeAtt;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> tiltAtt, bypassAtt, curvesAtt, curvesTopAtt, lookAtt;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> tiltAtt, bypassAtt, curvesAtt, curvesTopAtt, lookAtt, eqAtt;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> osAtt;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> lineAtt;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> lineSAtt, linePAtt;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> lineSAtt, linePAtt, preEqAtt;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> tiltSliderAtt, outAtt;
     juce::String footerText;
     int lastTheme = -1;

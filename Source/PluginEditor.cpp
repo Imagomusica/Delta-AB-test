@@ -292,6 +292,7 @@ void DuneField::timerCallback()
     for (int i = 0; i < eqd::kMaxBands; ++i)
     {
         bands[i] = proc.readBand (i);
+        if (paramValue (proc.apvts, "eq_on") < 0.5f) bands[i].on = false;
         if (bands[i].on && (bands[i].ch == eqd::Channel::Mid || bands[i].ch == eqd::Channel::Side)) anyMS = true;
     }
     const auto tilt = proc.readTilt();
@@ -850,7 +851,7 @@ void PresetGlyph::paintButton (juce::Graphics& g, bool highlighted, bool)
 }
 
 CompPanel::CompPanel (MasteringEQAudioProcessor& p, const Palette& pl)
-    : proc (p), pal (pl), onBtn ("SPLIT COMP", pl), postBtn ("POST EQ", pl), minBtn ("LINEAIRE", pl), linBtn ("LOI LOG", pl),
+    : proc (p), pal (pl), onBtn ("SPLIT COMP", pl), postBtn ("POST EQ", pl), minBtn ("LINEAIRE", pl), linBtn ("LOI LOG", pl), msBtn ("MID/SIDE", pl),
       pLow (0, pl), pMid (1, pl), pHigh (2, pl)
 {
     static const char* ids[8] { "comp_lo", "comp_hi", "comp_thr", "comp_ratio", "comp_att", "comp_rel", "comp_knee", "comp_mk" };
@@ -865,7 +866,12 @@ CompPanel::CompPanel (MasteringEQAudioProcessor& p, const Palette& pl)
         knobAtt[i] = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.apvts, ids[i], s);
     }
     knob[7].getProperties().set ("bipolar", true);
-    for (auto* b : { &onBtn, &postBtn, &minBtn, &linBtn }) addAndMakeVisible (b);
+    for (auto* b : { &onBtn, &postBtn, &minBtn, &linBtn, &msBtn }) addAndMakeVisible (b);
+    msBtn.onClick = [this]
+    {
+        const int cur = (int) std::lround (paramValue (proc.apvts, "comp_ms"));
+        setParamNormalised (proc.apvts, "comp_ms", (float) (msBtn.getToggleState() ? (cur == 0 ? 1 : cur) : 0));
+    };
     for (auto* c : { &msBox, &sloBox, &shiBox }) addAndMakeVisible (c);
     for (auto* b : { &pLow, &pMid, &pHigh }) addAndMakeVisible (b);
     pLow.setTooltip ("Grave seulement");  pMid.setTooltip ("Medium seulement");  pHigh.setTooltip ("Aigu seulement");
@@ -882,21 +888,39 @@ CompPanel::CompPanel (MasteringEQAudioProcessor& p, const Palette& pl)
     postAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, "comp_post", postBtn);
     linAtt  = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, "comp_lin", linBtn);
     minAtt  = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, "comp_min", minBtn);
+    foldBtn.setButtonText (juce::String::fromUTF8 ("\xE2\x96\xB4"));
+    foldBtn.setTooltip ("Reduire / agrandir le split comp (pour voir la courbe EQ dessous)");
+    foldBtn.onClick = [this] { setCollapsed (! collapsed); };
+    addAndMakeVisible (foldBtn);
+}
+
+void CompPanel::setCollapsed (bool c)
+{
+    collapsed = c;
+    foldBtn.setButtonText (juce::String::fromUTF8 (c ? "\xE2\x96\xBE" : "\xE2\x96\xB4"));
+    for (auto& k : knob) k.setVisible (! c);
+    for (auto* b : { &pLow, &pMid, &pHigh }) b->setVisible (! c);
+    linBtn.setVisible (! c);
+    msBtn.setVisible (! c);
+    if (onFold) onFold();
+    repaint();
 }
 
 void CompPanel::resized()
 {
     onBtn.setBounds (6, 8, 100, 26);
-    postBtn.setBounds (110, 8, 82, 26);
-    minBtn.setBounds (196, 8, 92, 26);
-    linBtn.setBounds (130, 42, 104, 20);
-    msBox.setBounds (292, 9, 78, 24);
-    sloBox.setBounds (374, 9, 82, 24);
-    shiBox.setBounds (460, 9, 82, 24);
+    postBtn.setBounds (110, 8, 78, 26);
+    minBtn.setBounds (192, 8, 88, 26);
+    msBox.setBounds (284, 9, 72, 24);
+    sloBox.setBounds (360, 9, 80, 24);
+    shiBox.setBounds (444, 9, 80, 24);
+    foldBtn.setBounds (528, 9, 16, 24);
     pLow.setBounds (10, 42, 32, 18);
     pMid.setBounds (46, 42, 32, 18);
     pHigh.setBounds (82, 42, 32, 18);
-    for (int i = 0; i < 8; ++i) knob[i].setBounds (8 + 66 * i + 4, 100, 54, 54);
+    linBtn.setBounds (130, 42, 104, 20);
+    msBtn.setBounds (240, 42, 104, 20);
+    for (int i = 0; i < 8; ++i) knob[i].setBounds (8 + 56 * i + 2, 100, 52, 52);
 }
 
 void CompPanel::refresh()
@@ -904,6 +928,7 @@ void CompPanel::refresh()
     postBtn.setLabel (postBtn.getToggleState() ? "POST EQ" : "PRE EQ");
     minBtn.setLabel (minBtn.getToggleState() ? "MINIMALE" : "LINEAIRE");
     linBtn.setLabel (linBtn.getToggleState() ? "LOI LINEAIRE" : "LOI LOG (dB)");
+    msBtn.setToggleState (paramValue (proc.apvts, "comp_ms") > 0.5f, juce::dontSendNotification);
     const float a = onBtn.getToggleState() ? 1.0f : 0.45f;
     for (auto& k : knob) k.setAlpha (a);
     repaint();
@@ -916,8 +941,23 @@ void CompPanel::paint (juce::Graphics& g)
     g.setColour (pal.ring);
     g.drawRect (getLocalBounds(), 1);
 
-    // the zone that gets compressed, on the same frequency axis as the sand (20 Hz - 20 kHz)
-    const juce::Rectangle<float> gr (8.0f, 40.0f, 530.0f, 54.0f);
+    auto v = [this] (const char* id) { return (double) paramValue (proc.apvts, id); };
+    const bool on = onBtn.getToggleState();
+
+    if (collapsed)
+    {
+        // thin gain-reduction strip under the buttons so the compressor can still be watched
+        const float gr = proc.compGrDb.load();
+        const juce::Rectangle<float> bar (8.0f, 36.0f, 530.0f, 5.0f);
+        g.setColour (pal.ring);
+        g.drawRect (bar, 1.0f);
+        g.setColour (pal.fg);
+        g.fillRect (bar.getX(), bar.getY(), bar.getWidth() * juce::jlimit (0.0f, 1.0f, gr / 25.0f), bar.getHeight());
+        return;
+    }
+
+    // ------------------------------------------------------------------ zone that gets compressed (same axis as the sand)
+    const juce::Rectangle<float> gr (8.0f, 40.0f, 380.0f, 54.0f);
     g.setColour (pal.ring);
     g.drawRect (gr, 1.0f);
     for (double f : { 100.0, 1000.0, 10000.0 })
@@ -930,7 +970,7 @@ void CompPanel::paint (juce::Graphics& g)
         g.drawText (f >= 1000.0 ? juce::String ((int) (f / 1000.0)) + "k" : juce::String ((int) f), (int) x - 12, (int) gr.getBottom() - 10, 24, 9, juce::Justification::centred);
     }
     juce::Path fill, line;
-    const int npts = 265;
+    const int npts = 190;
     for (int i = 0; i < npts; ++i)
     {
         const double f = 20.0 * std::pow (1000.0, (double) i / (double) (npts - 1));
@@ -942,17 +982,98 @@ void CompPanel::paint (juce::Graphics& g)
     }
     fill.lineTo (gr.getRight(), gr.getBottom() - 12.0f);
     fill.closeSubPath();
-    g.setColour (pal.fg.withAlpha (onBtn.getToggleState() ? 0.30f : 0.12f));
+    g.setColour (pal.fg.withAlpha (on ? 0.30f : 0.12f));
     g.fillPath (fill);
     g.setColour (pal.fg);
     g.strokePath (line, juce::PathStrokeType (1.5f));
-    g.setColour (pal.dim);
-    g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 8.5f, juce::Font::bold)));
-    g.drawText ("ZONE COMPRIMEE", (int) gr.getRight() - 120, (int) gr.getY() + 3, 114, 10, juce::Justification::right);
+
+    // ------------------------------------------------------------------ transfer curve with knee (input dB -> output dB)
+    const juce::Rectangle<float> tr (396.0f, 40.0f, 54.0f, 54.0f);
+    g.setColour (pal.ring);
+    g.drawRect (tr, 1.0f);
+    {
+        const float thr = (float) v ("comp_thr"), ratio = (float) v ("comp_ratio"), knee = (float) v ("comp_knee");
+        const bool linLaw = v ("comp_lin") > 0.5;
+        const float slope = 1.0f / std::max (ratio, 1.0f) - 1.0f;
+        const float thrLin = std::pow (10.0f, thr / 20.0f);
+        auto outDb = [&] (float inDb)
+        {
+            if (! linLaw)
+            {
+                const float over = inDb - thr;
+                float r;
+                if (2.0f * over < -knee) r = 0.0f;
+                else if (knee > 0.0f && 2.0f * std::abs (over) <= knee) { const float t = over + knee * 0.5f; r = slope * t * t / (2.0f * knee); }
+                else r = slope * over;
+                return inDb + r;
+            }
+            const float x = std::pow (10.0f, inDb / 20.0f);
+            const float kh = std::pow (10.0f, knee / 40.0f), xl = thrLin / kh, xu = thrLin * kh, r1 = 1.0f + slope;
+            float y = x;
+            if (x >= xu || knee <= 0.01f) y = x > thrLin ? thrLin + (x - thrLin) * r1 : x;
+            if (knee > 0.01f && x > xl && x < xu)
+            {
+                const float yu = thrLin + (xu - thrLin) * r1, w = xu - xl, t = (x - xl) / w, t2 = t * t, t3 = t2 * t;
+                y = (2*t3 - 3*t2 + 1) * xl + (t3 - 2*t2 + t) * w + (-2*t3 + 3*t2) * yu + (t3 - t2) * w * r1;
+            }
+            return 20.0f * std::log10 (std::max (y, 1.0e-6f));
+        };
+        auto px = [&] (float db) { return tr.getX() + 3.0f + (tr.getWidth() - 6.0f) * juce::jlimit (0.0f, 1.0f, (db + 60.0f) / 60.0f); };
+        auto py = [&] (float db) { return tr.getBottom() - 3.0f - (tr.getHeight() - 6.0f) * juce::jlimit (0.0f, 1.0f, (db + 60.0f) / 60.0f); };
+        g.setColour (pal.ring);
+        g.drawLine (px (-60.0f), py (-60.0f), px (0.0f), py (0.0f), 1.0f);       // 1:1
+        g.drawVerticalLine ((int) px (thr), tr.getY() + 2.0f, tr.getBottom() - 2.0f);   // threshold
+        juce::Path cp;
+        for (int i = 0; i <= 60; ++i)
+        {
+            const float d = -60.0f + (float) i;
+            if (i == 0) cp.startNewSubPath (px (d), py (outDb (d))); else cp.lineTo (px (d), py (outDb (d)));
+        }
+        g.setColour (pal.fg);
+        g.strokePath (cp, juce::PathStrokeType (1.5f));
+        g.setColour (pal.dim);
+        g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 7.0f, juce::Font::bold)));
+        g.drawText ("GENOU", (int) tr.getX() + 2, (int) tr.getY() + 1, 40, 8, juce::Justification::left);
+    }
+
+    // ------------------------------------------------------------------ meter columns: peak, VU (slow), gain reduction
+    {
+        const float peakDb = std::max (proc.meters[0].ppm.load(), proc.meters[1].ppm.load());
+        const float vu     = std::max (proc.meters[0].vu.load(),  proc.meters[1].vu.load()) + 18.0f;
+        const float red    = proc.compGrDb.load();
+        const float top = 42.0f, bot = 158.0f, bh = bot - top;
+        struct Col { const char* name; float x, frac; juce::String val; bool fromTop; std::initializer_list<float> ticks; float lo, hi; };
+        const Col cols[3] {
+            { "PEAK", 468.0f, (peakDb + 40.0f) / 40.0f, peakDb <= -99.0f ? juce::String ("--") : juce::String (peakDb, 1), false, { -40.0f, -30.0f, -20.0f, -10.0f, -6.0f, -3.0f, 0.0f }, -40.0f, 0.0f },
+            { "VU",   494.0f, (vu + 20.0f) / 23.0f,     vu <= -50.0f ? juce::String ("--") : juce::String (vu, 1),         false, { -20.0f, -10.0f, -5.0f, 0.0f, 3.0f }, -20.0f, 3.0f },
+            { "RED",  520.0f, red / 25.0f,              juce::String (red, 1),                                            true,  { 0.0f, 3.0f, 6.0f, 10.0f, 15.0f, 20.0f, 25.0f }, 0.0f, 25.0f } };
+        for (const auto& cl : cols)
+        {
+            const juce::Rectangle<float> r (cl.x, top, 14.0f, bh);
+            g.setColour (pal.ring);
+            g.drawRect (r, 1.0f);
+            const float f = juce::jlimit (0.0f, 1.0f, cl.frac);
+            g.setColour (pal.fg);
+            if (cl.fromTop) g.fillRect (r.getX() + 2.0f, r.getY() + 1.0f, r.getWidth() - 4.0f, (bh - 2.0f) * f);
+            else            g.fillRect (r.getX() + 2.0f, r.getBottom() - 1.0f - (bh - 2.0f) * f, r.getWidth() - 4.0f, (bh - 2.0f) * f);
+            g.setColour (pal.bg);
+            for (float t : cl.ticks)                                              // scale marks cut into the bar
+            {
+                const float tf = (t - cl.lo) / (cl.hi - cl.lo);
+                const float yy = cl.fromTop ? r.getY() + 1.0f + (bh - 2.0f) * tf : r.getBottom() - 1.0f - (bh - 2.0f) * tf;
+                g.drawHorizontalLine ((int) yy, r.getX() + 1.0f, r.getRight() - 1.0f);
+            }
+            g.setColour (pal.dim);
+            g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 8.5f, juce::Font::bold)));
+            g.drawText (cl.name, (int) cl.x - 6, (int) bot + 3, 26, 9, juce::Justification::centred);
+            g.setColour (pal.fg);
+            g.setFont (juce::Font (juce::FontOptions (juce::Font::getDefaultMonospacedFontName(), 8.5f, juce::Font::plain)));
+            g.drawText (cl.val, (int) cl.x - 8, (int) bot + 13, 30, 9, juce::Justification::centred);
+        }
+    }
 
     static const char* names[8] { "DEPUIS", "JUSQU'A", "SEUIL", "RATIO", "ATTAQUE", "RELACHE", "KNEE", "GAIN" };
-    auto v = [this] (const char* id) { return (double) paramValue (proc.apvts, id); };
-    auto fq = [] (double f, bool lo) { return (lo && f <= 20.5) || (! lo && f >= 19999.0) ? juce::String ("ouvert") : (f >= 1000.0 ? juce::String (f / 1000.0, 2) + " kHz" : juce::String (f, 0) + " Hz"); };
+    auto fq = [] (double f, bool lo) { return (lo && f <= 20.5) || (! lo && f >= 19999.0) ? juce::String ("ouvert") : (f >= 1000.0 ? juce::String (f / 1000.0, 2) + "k" : juce::String (f, 0) + " Hz"); };
     juce::String txt[8] {
         fq (v ("comp_lo"), true), fq (v ("comp_hi"), false), juce::String (v ("comp_thr"), 1) + " dB", juce::String (v ("comp_ratio"), 1) + ":1",
         v ("comp_att") < 10.0 ? juce::String (v ("comp_att"), 1) + " ms" : juce::String ((int) v ("comp_att")) + " ms",
@@ -960,19 +1081,21 @@ void CompPanel::paint (juce::Graphics& g)
         juce::String (v ("comp_knee"), 1) + " dB", (v ("comp_mk") > 0.05 ? "+" : "") + juce::String (v ("comp_mk"), 1) + " dB" };
     for (int i = 0; i < 8; ++i)
     {
-        const int x = 8 + 66 * i;
+        const int x = 8 + 56 * i;
         g.setColour (pal.dim);
-        g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 9.0f, juce::Font::bold)));
-        g.drawText (names[i], x, 155, 66, 11, juce::Justification::centred);
+        g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 8.5f, juce::Font::bold)));
+        g.drawText (names[i], x, 155, 56, 11, juce::Justification::centred);
         g.setColour (pal.fg);
-        g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 10.5f, juce::Font::plain)));
-        g.drawText (txt[i], x, 166, 66, 13, juce::Justification::centred);
+        g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 10.0f, juce::Font::plain)));
+        g.drawText (txt[i], x, 166, 56, 13, juce::Justification::centred);
     }
 }
 
 // ===========================================================================
-SrcPanel::SrcPanel (MasteringEQAudioProcessor& p, const Palette& pl) : proc (p), pal (pl)
+SrcPanel::SrcPanel (MasteringEQAudioProcessor& p, const Palette& pl) : proc (p), pal (pl), osSw ("OVERSAMPLING", pl)
 {
+    addAndMakeVisible (osSw);
+    osSwAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, "os_on", osSw);
     addAndMakeVisible (osBox);
     addAndMakeVisible (steepBox);
     fillCombo (proc.apvts, "proc_os", osBox);
@@ -993,6 +1116,7 @@ SrcPanel::SrcPanel (MasteringEQAudioProcessor& p, const Palette& pl) : proc (p),
 
 void SrcPanel::resized()
 {
+    osSw.setBounds (4, 3, 128, 24);
     osBox.setBounds (8, 30, 70, 24);
     steepBox.setBounds (86, 30, 112, 24);
     cutKnob.setBounds (214, 14, 52, 52);
@@ -1007,7 +1131,6 @@ void SrcPanel::paint (juce::Graphics& g)
     g.drawRect (getLocalBounds(), 1);
     g.setColour (pal.dim);
     g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 9.5f, juce::Font::bold)));
-    g.drawText ("OVERSAMPLING", 8, 6, 78, 12, juce::Justification::left);
     g.drawText ("FILTRE UP / DOWN", 134, 6, 120, 12, juce::Justification::left);
     g.drawText ("PENTE", 86, 56, 112, 11, juce::Justification::left);
     g.drawText ("COUPURE", 272, 20, 100, 11, juce::Justification::left);
@@ -1024,7 +1147,7 @@ void SrcPanel::paint (juce::Graphics& g)
 }
 
 // ===========================================================================
-DuneContent::DuneContent (MasteringEQAudioProcessor& p) : proc (p), field (p, palette), curvesBtn ("COURBES", palette), curvesTopBtn ("DESSUS", palette), tiltBtn ("TILT", palette), bypassBtn ("BYPASS", palette), lookBtn ("ANTICIPATION", palette), lineBtn ("TILT DROIT", palette), comp (p, palette), src (p, palette)
+DuneContent::DuneContent (MasteringEQAudioProcessor& p) : proc (p), field (p, palette), curvesBtn ("COURBES", palette), curvesTopBtn ("DESSUS", palette), tiltBtn ("TILT", palette), bypassBtn ("BYPASS", palette), eqBtn ("EQ", palette), lookBtn ("ANTICIPATION", palette), lineBtn ("TILT DROIT", palette), comp (p, palette), src (p, palette)
 {
     setLookAndFeel (&lnf);
     lnf.setPalette (palette);
@@ -1057,6 +1180,8 @@ DuneContent::DuneContent (MasteringEQAudioProcessor& p) : proc (p), field (p, pa
     outAtt        = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.apvts, "out", outSlider);
 
     addAndMakeVisible (tiltBtn);
+    addAndMakeVisible (eqBtn);
+    eqAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, "eq_on", eqBtn);
     addAndMakeVisible (bypassBtn);
     addAndMakeVisible (curvesBtn);
     addAndMakeVisible (curvesTopBtn);
@@ -1064,7 +1189,7 @@ DuneContent::DuneContent (MasteringEQAudioProcessor& p) : proc (p), field (p, pa
     addAndMakeVisible (osBox);
     addAndMakeVisible (src);
     addAndMakeVisible (lineBtn);
-    for (auto* s : { &lineSlider, &linePivot })
+    for (auto* s : { &lineSlider, &linePivot, &preKnobEq })
     {
         s->setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
         s->setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
@@ -1075,6 +1200,8 @@ DuneContent::DuneContent (MasteringEQAudioProcessor& p) : proc (p), field (p, pa
     lineAtt   = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, "tilt_line", lineBtn);
     lineSAtt  = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.apvts, "line_db", lineSlider);
     linePAtt  = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.apvts, "line_freq", linePivot);
+    preEqAtt  = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.apvts, "eq_pre", preKnobEq);
+    preKnobEq.setTooltip ("Pre-ringing de l'EQ lineaire: 100 % = phase lineaire pure, 0 % = phase minimale (aucun pre-ringing)");
     addAndMakeVisible (comp);
     fillCombo (proc.apvts, "os", osBox);
     osAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, "os", osBox);
@@ -1156,6 +1283,7 @@ void DuneContent::resized()
     qualityBox.setBounds (532, y, 128, h);
     tuningBox.setBounds (668, y, 92, h);
     tiltBtn.setBounds (770, y, 62, h);
+    eqBtn.setBounds (150, y, 70, h);
     tiltSlider.setBounds (838, 4, 36, 36);
     outSlider.setBounds (1058, 4, 36, 36);
     bypassBtn.setBounds (1148, y, 86, h);
@@ -1168,7 +1296,10 @@ void DuneContent::resized()
     lineBtn.setBounds (386, 761, 112, 24);
     lineSlider.setBounds (506, 758, 30, 30);
     linePivot.setBounds (700, 758, 30, 30);
-    comp.setBounds (690, 45 + 6, 546, 180);
+    preKnobEq.setBounds (826, 758, 30, 30);
+    comp.onFold = [this] { resized(); };
+    comp.setBounds (690, 45 + 6, 546, comp.isCollapsed() ? 44 : 180);
+    src.setVisible (! comp.isCollapsed());
     comp.toFront (false);
     lookBtn.setBounds (150, 761, 128, 24);
     osBox.setBounds (322, 761, 58, 24);
@@ -1206,6 +1337,13 @@ void DuneContent::paint (juce::Graphics& g)
         g.setColour (palette.fg);
         g.setFont (juce::Font (juce::FontOptions ("Helvetica Neue", 11.5f, juce::Font::plain)));
         g.drawText ((sl > 0.005 ? "+" : "") + juce::String (sl, 2) + " dB/oct", 540, 761, 82, 24, juce::Justification::centredLeft);
+        {
+            const double pr = paramValue (proc.apvts, "eq_pre");
+            const bool lin = (int) std::lround (paramValue (proc.apvts, "mode")) == 0;
+            g.setColour (lin ? palette.fg : palette.dim);
+            g.drawText ("PRE-RINGING EQ " + juce::String ((int) pr) + " %", 862, 761, 140, 24, juce::Justification::centredLeft);
+            g.setColour (palette.fg);
+        }
         g.drawText (pv >= 1000.0 ? juce::String (pv / 1000.0, 2) + " kHz" : juce::String ((int) pv) + " Hz", 734, 761, 80, 24, juce::Justification::centredLeft);
     }
     g.setColour (palette.dim);
