@@ -723,11 +723,11 @@ void DuneField::drawMeters (juce::Graphics& g)
 
 // ===========================================================================
 // One band: number/on, type, big frequency knob, gain + Q knobs (or slope), ST/M/S
-BandStrip::BandStrip (MasteringEQAudioProcessor& p, int index, const Palette& pl) : proc (p), band (index), pal (pl)
+BandStrip::BandStrip (MasteringEQAudioProcessor& p, int index, const Palette& pl)
+    : proc (p), band (index), pal (pl), numBtn (juce::String (index + 1).paddedLeft ('0', 2), pl)
 {
     auto id = [index] (const char* n) { return MasteringEQAudioProcessor::pid (index, n); };
 
-    numBtn.setButtonText (juce::String (index + 1).paddedLeft ('0', 2));
     addAndMakeVisible (numBtn);
     fillCombo (proc.apvts, id ("type"), typeBox);
     fillCombo (proc.apvts, id ("slope"), slopeBox);
@@ -794,8 +794,8 @@ void BandStrip::refresh()
 
 void BandStrip::resized()
 {
-    numBtn.setBounds (8, 10, 30, 22);
-    typeBox.setBounds (42, 10, 100, 22);
+    numBtn.setBounds (6, 8, 64, 26);
+    typeBox.setBounds (74, 10, 70, 22);
     freqKnob.setBounds (38, 40, 74, 74);
     famBox.setBounds (8, 142, 134, 20);
     slopeBox.setBounds (8, 165, 134, 20);

@@ -150,7 +150,8 @@ private:
     bool bandOn = true;
     bool isPass = false, hasGain = true;
 
-    juce::TextButton numBtn, stBtn, mBtn, sBtn;
+    NagraSwitch numBtn;
+    juce::TextButton stBtn, mBtn, sBtn;
     juce::ComboBox typeBox, slopeBox, famBox;
     juce::Slider freqKnob, gainKnob, qKnob;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> onAtt;
