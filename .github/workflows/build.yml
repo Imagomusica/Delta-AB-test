@@ -50,7 +50,21 @@ jobs:
           cp "build/Dune_artefacts/Release/Standalone/Dune.exe" dist/ || true
           ls -R dist | head -30
 
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) { choco install innosetup -y --no-progress; $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
+          & $iscc installer\Dune.iss
+          mkdir dist-setup
+          Copy-Item installer\out\Dune-Setup.exe dist-setup\
+
       - uses: actions/upload-artifact@v4
         with:
           name: Dune-Windows
           path: dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Dune-Windows-Installer
+          path: dist-setup
